@@ -7,12 +7,18 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../src/Nebb.DevManager/Nebb.DevManager.csproj" Aliases="NebbApp" />
     <Compile Include="../../src/Nebb.DevManager/CommandSettings.cs" Link="CommandSettings.cs" />
     <Compile Include="../../src/Nebb.DevManager/RunProfiles.cs" Link="RunProfiles.cs" />
     <Compile Include="../../src/Nebb.DevManager/RunProfileManager.cs" Link="RunProfileManager.cs" />
     <Compile Include="../../src/Nebb.DevManager/ListeningPorts.cs" Link="ListeningPorts.cs" />
     <Compile Include="../../src/Nebb.DevManager/CommandRunManager.cs" Link="CommandRunManager.cs" />
     <Compile Include="../../src/Nebb.DevManager/WindowsRunJob.cs" Link="WindowsRunJob.cs" />
+    <Compile Include="../../src/Nebb.DevManager/WindowsRunProcess.cs" Link="WindowsRunProcess.cs" />
+    <Compile Include="../../src/Nebb.DevManager/ConsoleStopSignal.cs" Link="ConsoleStopSignal.cs" />
+    <Compile Include="../../src/Nebb.DevManager/ProcessCommandLine.cs" Link="ProcessCommandLine.cs" />
+    <Compile Include="../../src/Nebb.DevManager/ProcessHistory.cs" Link="ProcessHistory.cs" />
+    <Compile Include="../../src/Nebb.DevManager/EnvironmentSnapshot.cs" Link="EnvironmentSnapshot.cs" />
     <Compile Include="../../src/Nebb.DevManager/CommandDiscovery.cs" Link="CommandDiscovery.cs" />
     <Compile Include="../../src/Nebb.DevManager/CommandDetectionRules.cs" Link="CommandDetectionRules.cs" />
     <Compile Include="../../src/Nebb.DevManager/CommandSettingsDialog.xaml.cs" Link="CommandSettingsDialog.xaml.cs" />
@@ -21,5 +27,7 @@
     <Page Include="../../src/Nebb.DevManager/RunProfilesDialog.xaml" Link="RunProfilesDialog.xaml" />
     <Compile Include="../../src/Nebb.DevManager/RunPortConflictDialog.xaml.cs" Link="RunPortConflictDialog.xaml.cs" />
     <Page Include="../../src/Nebb.DevManager/RunPortConflictDialog.xaml" Link="RunPortConflictDialog.xaml" />
+    <Compile Include="../../src/Nebb.DevManager/ProcessShutdownDialog.xaml.cs" Link="ProcessShutdownDialog.xaml.cs" />
+    <Page Include="../../src/Nebb.DevManager/ProcessShutdownDialog.xaml" Link="ProcessShutdownDialog.xaml" />
   </ItemGroup>
 </Project>

@@ -9,8 +9,7 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
-        // Share the original mutex so the two managers cannot control the same server at once.
-        instanceMutex = new Mutex(initiallyOwned: true, "Local\\PixPeek.DevManager", out var createdNew);
+        instanceMutex = new Mutex(initiallyOwned: true, "Local\\Nebb.DevManager", out var createdNew);
         ownsMutex = createdNew;
         if (!createdNew)
         {
@@ -44,7 +43,6 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        WindowsRunJob.TerminateAll();
         if (ownsMutex) instanceMutex?.ReleaseMutex();
         instanceMutex?.Dispose();
         base.OnExit(e);

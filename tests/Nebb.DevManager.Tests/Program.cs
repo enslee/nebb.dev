@@ -29,6 +29,42 @@ if (args.Length == 3 && args[0] == "--start-run-fixture")
     return;
 }
 
+if (args.Length == 3 && args[0] == "--start-profile-fixture")
+{
+    var fixture = new RunProfile { Id = "reattach-profile", Name = "Reattach", Items =
+    [
+        new RunItem { Id = "reattach-item", Name = "Server", Kind = RunItemKind.ShellScript,
+            Script = "Write-Output 'before-close'; Start-Sleep -Seconds 2; " +
+                "Write-Output 'after-close'; Start-Sleep -Seconds 30",
+            Environment = [new EnvironmentEntry("RUN_MARKER", "protected-value")] }
+    ] };
+    await new RunProfileManager(args[1], args[2]).RunAllAsync(args[1], fixture);
+    return;
+}
+
+if (args.Length == 3 && args[0] == "--start-profile-child-fixture")
+{
+    var fixture = new RunProfile { Id = "child-profile", Name = "Child", Items =
+    [
+        new RunItem { Id = "child-item", Name = "Child Server", Kind = RunItemKind.ShellScript,
+            Script = "Start-Process powershell.exe -ArgumentList '-NoProfile -Command " +
+                "\"Start-Sleep -Seconds 30\"' -NoNewWindow; Start-Sleep -Seconds 1" }
+    ] };
+    await new RunProfileManager(args[1], args[2]).RunAllAsync(args[1], fixture);
+    await Task.Delay(3000);
+    return;
+}
+
+if (args.Length == 3 && args[0] == "--inspect-profile-fixture")
+{
+    var fixture = new RunProfile { Id = "reattach-profile", Name = "Reattach", Items =
+        [new RunItem { Id = "reattach-item", Name = "Server" }] };
+    var manager = new RunProfileManager(args[1], args[2]);
+    var state = manager.GetItemState(args[1], fixture, fixture.Items[0]);
+    Console.WriteLine($"{state.Status} | {state.Reason} | PID {state.ProcessId}");
+    return;
+}
+
 var root = Path.Combine(Path.GetTempPath(), "NebbCommandTests", Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
 try
@@ -305,8 +341,8 @@ try
                 await child.WaitForExitAsync();
                 Expect(child.ExitCode == 0, "Fixture start process failed");
             }
-            Expect(!runManager.GetState(runThree).IsRunning,
-                "Run from previous process survived Dev Manager exit");
+            Expect(runManager.GetState(runThree).IsRunning,
+                "Named job did not survive its launcher process exit");
 
             var quick = new SavedCommand
                 { Name = "Quick", Command = "cmd.exe", Arguments = "/d /c exit 0", WorkingDirectory = "apps/desktop" };
@@ -438,7 +474,24 @@ try
             await runner.RunAllAsync(root, parallel);
             Expect(runner.HasActiveItems(root, profile) && runner.HasActiveItems(root, parallel),
                 "Different profiles could not run simultaneously");
-            await runner.StopAllAsync(root, parallel);
+            await runner.RunAllAsync(branchRoot, parallel);
+            Expect(runner.HasActiveItems(root, parallel) &&
+                runner.HasActiveItems(branchRoot, parallel) &&
+                runner.ListInstances().Count(view => view.IsRunning) >= 4,
+                "Different worktrees could not run simultaneously");
+            await runner.StopAllAsync(branchRoot, parallel);
+            await runner.KillItemAsync(root, parallel, parallel.Items[0].Id);
+            Expect(runner.GetItemState(root, parallel, parallel.Items[0]).Status ==
+                RunItemStatus.Stopped, "Kill did not stop the entire Job");
+            var oldStepId = runner.GetItemState(root, profile, step).InstanceId;
+            var oldServerId = runner.GetItemState(root, profile, server).InstanceId;
+            var oldAppId = runner.GetItemState(root, profile, app).InstanceId;
+            await runner.RestartAllAsync(root, profile);
+            Expect(runner.GetItemState(root, profile, step).InstanceId == oldStepId &&
+                runner.GetItemState(root, profile, server).InstanceId != oldServerId &&
+                runner.GetItemState(root, profile, app).InstanceId != oldAppId &&
+                runner.GetItemState(root, profile, app).Status == RunItemStatus.Running,
+                "Restart All did not preserve completed one-shot or reapply dependencies");
             await runner.StopItemAsync(root, profile, server.Id);
             Expect(ListeningPorts.Owners(port).Count == 0 &&
                 runner.GetItemState(root, profile, app).Status == RunItemStatus.Running &&
@@ -501,11 +554,29 @@ try
                 processProfile.Items[0], false).Contains($"marker:{processFolder}",
                 StringComparison.OrdinalIgnoreCase), "Process working directory or environment failed");
 
+        var shortServer = new RunProfile { Name = "Unexpected exit", Items = [new RunItem
+        {
+            Name = "Short server", Kind = RunItemKind.ShellScript,
+            Script = "Start-Sleep -Seconds 2; exit 0"
+        }] };
+        await runner.RunAllAsync(root, shortServer);
+        for (var attempt = 0; attempt < 40 && runner.GetItemState(root, shortServer,
+                 shortServer.Items[0]).Status == RunItemStatus.Running; attempt++)
+            await Task.Delay(100);
+        var unexpected = runner.GetItemState(root, shortServer, shortServer.Items[0]);
+        Expect(unexpected.Status == RunItemStatus.Exited && unexpected.ExitCode == 0,
+            "Long-running exit 0 was not marked unexpected");
+
         if (Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator)
             .Any(path => File.Exists(Path.Combine(path, "npm.cmd"))) == true)
         {
+            Put("apps/mobile/child.js",
+                "console.log('profile-child-ready');setInterval(()=>{},1000);");
+            Put("apps/mobile/parent.js",
+                "require('child_process').spawn(process.execPath,['child.js']," +
+                "{stdio:'inherit'});setInterval(()=>{},1000);");
             Put("apps/mobile/package.json",
-                """{"scripts":{"dev":"node -e \"console.log('profile-npm-ready');setInterval(()=>{},1000)\""}}""");
+                """{"scripts":{"dev":"node parent.js"}}""");
             var npmProfile = new RunProfile { Name = "npm process tree", Items = [new RunItem
             {
                 Name = "npm", Command = "npm", Arguments = "run dev",
@@ -514,12 +585,18 @@ try
             await runner.RunAllAsync(root, npmProfile);
             for (var attempt = 0; attempt < 50 &&
                 !runner.ReadLog(root, npmProfile, npmProfile.Items[0], false)
-                    .Contains("profile-npm-ready"); attempt++) await Task.Delay(100);
+                    .Contains("profile-child-ready"); attempt++) await Task.Delay(100);
+            var npmRecord = runner.ListInstances().Single(view =>
+                view.Record.ProfileId == npmProfile.Id && view.IsRunning).Record;
+            var npmMembers = WindowsRunJob.ProcessIds(npmRecord.JobName!)!;
             Expect(runner.HasActiveItems(root, npmProfile) &&
+                npmMembers.Count >= 3 &&
                 runner.ReadLog(root, npmProfile, npmProfile.Items[0], false)
-                    .Contains("profile-npm-ready"), "npm child did not stay under profile run");
+                    .Contains("profile-child-ready"), "npm child tree did not stay under profile run");
             await runner.StopAllAsync(root, npmProfile);
-            Expect(!runner.HasActiveItems(root, npmProfile), "npm process tree was not stopped");
+            Expect(!runner.HasActiveItems(root, npmProfile) &&
+                !WindowsRunJob.IsRunning(npmRecord.JobName!),
+                "npm process tree was not stopped");
         }
 
         using var externalListener = new TcpListener(IPAddress.Loopback, 0);
@@ -547,6 +624,134 @@ try
         await runner.RunAllAsync(root, timeoutProfile);
         Expect(runner.GetItemState(root, timeoutProfile, timeoutProfile.Items[0]).Status ==
             RunItemStatus.Failed, "Port timeout did not fail");
+
+        var recoveryState = Path.Combine(root, "reattach-state");
+        var recoveryProfile = new RunProfile { Id = "reattach-profile", Name = "Reattach", Items =
+        [new RunItem { Id = "reattach-item", Name = "Server", Kind = RunItemKind.ShellScript }] };
+        var profileStart = new ProcessStartInfo("dotnet")
+        {
+            UseShellExecute = false, CreateNoWindow = true
+        };
+        profileStart.ArgumentList.Add(typeof(CommandRunManager).Assembly.Location);
+        profileStart.ArgumentList.Add("--start-profile-fixture");
+        profileStart.ArgumentList.Add(root);
+        profileStart.ArgumentList.Add(recoveryState);
+        using (var child = Process.Start(profileStart)!)
+        {
+            await child.WaitForExitAsync();
+            Expect(child.ExitCode == 0, "Profile fixture failed to start");
+        }
+        var recovered = new RunProfileManager(root, recoveryState);
+        var recoveryJobName = System.Text.Json.JsonSerializer.Deserialize<RunInstanceRecord>(
+            File.ReadAllText(Directory.GetFiles(recoveryState, "latest.json",
+                SearchOption.AllDirectories).Single()))?.JobName;
+        try
+        {
+            var state = recovered.GetItemState(root, recoveryProfile, recoveryProfile.Items[0]);
+            Expect(state.Status == RunItemStatus.Running,
+                $"Named job was not reattached: {state.Status} {state.Reason}");
+            var view = recovered.ListInstances().Single(value =>
+                value.Record.InstanceId == state.InstanceId);
+            recoveryJobName = view.Record.JobName;
+            Expect(view.Record.JobName is not null &&
+                WindowsRunJob.ProcessIds(view.Record.JobName)?.Count > 0,
+                "Persisted job name did not reopen");
+            Expect(EnvironmentSnapshot.Unprotect(view.Record.EncryptedEnvironment)
+                .Any(entry => entry.Name == "RUN_MARKER" && entry.Value == "protected-value"),
+                "Environment snapshot was not protected and restored");
+            for (var attempt = 0; attempt < 50 && !recovered.ReadInstanceLog(view.Record, false)
+                     .Contains("after-close"); attempt++) await Task.Delay(100);
+            Expect(recovered.ReadInstanceLog(view.Record, false).Contains("after-close"),
+                "Child stopped writing logs after Nebb process exited");
+            var latestPath = Directory.GetFiles(recoveryState, "latest.json",
+                SearchOption.AllDirectories).Single();
+            var original = File.ReadAllText(latestPath);
+            var stale = view.Record with { StartedUtc = view.Record.StartedUtc.AddHours(-1) };
+            File.WriteAllText(latestPath, System.Text.Json.JsonSerializer.Serialize(stale));
+            var detached = new RunProfileManager(root, recoveryState).GetItemState(
+                root, recoveryProfile, recoveryProfile.Items[0]);
+            Expect(detached.Status == RunItemStatus.Unknown &&
+                detached.Reason?.Contains("Stale/Detached") == true,
+                "Reused PID or changed identity was trusted");
+            File.WriteAllText(latestPath, original);
+        }
+        finally
+        {
+            if (recoveryJobName is not null) WindowsRunJob.Terminate(recoveryJobName);
+            await recovered.StopRunningAsync();
+        }
+
+        var childState = Path.Combine(root, "child-state");
+        var childStart = new ProcessStartInfo("dotnet")
+            { UseShellExecute = false, CreateNoWindow = true };
+        childStart.ArgumentList.Add(typeof(CommandRunManager).Assembly.Location);
+        childStart.ArgumentList.Add("--start-profile-child-fixture");
+        childStart.ArgumentList.Add(root);
+        childStart.ArgumentList.Add(childState);
+        using (var child = Process.Start(childStart)!)
+        {
+            await child.WaitForExitAsync();
+            Expect(child.ExitCode == 0, "Child-only fixture failed to start");
+        }
+        var childRecord = System.Text.Json.JsonSerializer.Deserialize<RunInstanceRecord>(
+            File.ReadAllText(Directory.GetFiles(childState, "latest.json",
+                SearchOption.AllDirectories).Single()))!;
+        try
+        {
+            var childProfile = new RunProfile { Id = "child-profile", Name = "Child", Items =
+                [new RunItem { Id = "child-item", Name = "Child Server" }] };
+            var childManager = new RunProfileManager(root, childState);
+            var childStatus = childManager.GetItemState(root, childProfile, childProfile.Items[0]);
+            Expect(childStatus.Status == RunItemStatus.Running &&
+                WindowsRunJob.ProcessIds(childRecord.JobName!)?.Count > 0 &&
+                !WindowsRunJob.ProcessIds(childRecord.JobName!)!.Contains(childRecord.ProcessId!.Value),
+                $"Child-only named job was not reattached: {childStatus.Status} {childStatus.Reason}");
+        }
+        finally { WindowsRunJob.Terminate(childRecord.JobName!); }
+
+        var historyStorage = Path.Combine(root, "history-state");
+        var history = new RunProfileManager(root, historyStorage);
+        var historyRoot = Path.Combine(historyStorage,
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(root.ToUpperInvariant())))[..20]
+                .ToLowerInvariant());
+        for (var index = 0; index < 25; index++)
+        {
+            var folder = Path.Combine(historyRoot, "history", index.ToString());
+            Directory.CreateDirectory(folder);
+            var ended = DateTime.UtcNow.AddHours(index == 0 ? -24 * 31 : -1);
+            var record = new RunInstanceRecord($"history-{index}", root, "history", $"item-{index}",
+                null, ended.AddMinutes(-1), ended, RunItemStatus.Exited, 0, null)
+                { ItemName = $"History {index}" };
+            File.WriteAllText(Path.Combine(folder, "instance.json"),
+                System.Text.Json.JsonSerializer.Serialize(record));
+            File.WriteAllText(Path.Combine(folder, "stdout.log"), "ended log");
+        }
+        history.PruneHistory();
+        Expect(!Directory.Exists(Path.Combine(historyRoot, "history", "0")) &&
+            history.ListInstances().Count == 20,
+            "30-day retention or recent-20 panel policy failed");
+        history.ClearHistory();
+        Expect(history.ListInstances().Count == 0,
+            "Clear history retained terminated instances");
+
+        Directory.CreateDirectory(Path.Combine(root, ".git"));
+        Put("package.json", "{}");
+        Put("src/PixPeek.Server/PixPeek.Server.csproj", "<Project />");
+        var pixpeekStore = new CommandSettingsStore(root, Path.Combine(root, "pixpeek-settings"));
+        var pixpeekWorktrees = new[] { new Worktree(root, "main"),
+            new Worktree(branchRoot, "feature") };
+        PixPeekLegacyMigration.Ensure(root, pixpeekWorktrees, pixpeekStore);
+        var converted = pixpeekStore.Load();
+        Expect(pixpeekWorktrees.All(worktree => converted.EffectiveProfiles(worktree.Path)
+            .Single().Items.Count == 2) &&
+            converted.EffectiveProfiles(root).Single().Items[0].Lifecycle == RunLifecycle.OneShot &&
+            converted.EffectiveProfiles(root).Single().Items[1].Lifecycle == RunLifecycle.LongRunning,
+            "PixPeek legacy run did not become a generic profile");
+        var convertedId = converted.EffectiveProfiles(root).Single().Items[0].Id;
+        PixPeekLegacyMigration.Ensure(root, pixpeekWorktrees, pixpeekStore);
+        Expect(pixpeekStore.Load().EffectiveProfiles(root).Single().Items[0].Id == convertedId,
+            "PixPeek legacy migration ran more than once");
     }
 
     Console.WriteLine($"PASS: {candidates.Count} candidates, profile migration/snapshot/dependencies/jobs/logs");
@@ -555,5 +760,6 @@ finally
 {
     var basePath = Path.Combine(Path.GetTempPath(), "NebbCommandTests") + Path.DirectorySeparatorChar;
     if (root.StartsWith(basePath, StringComparison.OrdinalIgnoreCase) && Directory.Exists(root))
-        Directory.Delete(root, recursive: true);
+        try { Directory.Delete(root, recursive: true); }
+        catch (IOException error) { Console.Error.WriteLine("Test cleanup: " + error.Message); }
 }

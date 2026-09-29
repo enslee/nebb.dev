@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -21,7 +22,7 @@ public partial class MainWindow : Window
         {
             Repository = repository;
             BaseBranch = GitBranchDefaults.Detect(repository.Path);
-            Manager = new DevServerManager(repository.Path);
+            Worktrees = new GitWorktreeService(repository.Path);
             CommandStore = new CommandSettingsStore(repository.Path);
             ProfileManager = new RunProfileManager(repository.Path);
             Git = new GitStatusService(repository.Path, BaseBranch);
@@ -29,8 +30,9 @@ public partial class MainWindow : Window
         }
 
         public RepositoryEntry Repository { get; }
+        public string DisplayName => Repository.DisplayName;
         public string BaseBranch { get; }
-        public DevServerManager Manager { get; }
+        public GitWorktreeService Worktrees { get; }
         public CommandSettingsStore CommandStore { get; }
         public RunProfileManager ProfileManager { get; }
         public GitStatusService Git { get; }
@@ -44,12 +46,11 @@ public partial class MainWindow : Window
         private string? activityStatus;
 
         public WorktreeRow(RepositoryContext context, Worktree worktree,
-            WorktreeState state, GitWorktreeState gitState,
+            GitWorktreeState gitState,
             IReadOnlyList<RunProfile>? profiles = null, RunProfile? selectedProfile = null)
         {
             Context = context;
             Worktree = worktree;
-            State = state;
             GitState = gitState;
             Profiles = profiles ?? [];
             SelectedProfile = selectedProfile;
@@ -57,7 +58,6 @@ public partial class MainWindow : Window
 
         public RepositoryContext Context { get; }
         public Worktree Worktree { get; }
-        public WorktreeState State { get; }
         public GitWorktreeState GitState { get; }
         public IReadOnlyList<RunProfile> Profiles { get; }
         public RunProfile? SelectedProfile { get; }
@@ -69,25 +69,25 @@ public partial class MainWindow : Window
         public bool AnyFailedProfile => Profiles.Any(profile =>
             Context.ProfileManager.GetProfileStatus(Path, profile) == RunProfileStatus.Failed);
         public string RepositoryName => Context.Repository.Name;
-        public bool IsPixPeek => Context.Repository.IsPixPeek;
         public string Branch => Worktree.Branch;
         public string Path => Worktree.Path;
-        public string ServerStatus => activityStatus ?? (IsPixPeek
-            ? State.Status == "시작 중" ? "전환 중" : State.Status
-            : Profiles.Count == 0 ? "미설정" : AnyPartialProfile ? "일부 실행" :
-                ActiveProfiles > 0 ? $"실행 중 {ActiveProfiles}" :
-                AnyFailedProfile ? "실패" : "중지");
-        public Brush IndicatorBrush => activityStatus is not null || State.Status == "시작 중" ? Brushes.DarkOrange :
-            State.HasProcesses || ActiveProfiles > 0
-                ? Brushes.ForestGreen : Brushes.Gray;
-        public string IndicatorText => IsPixPeek || ActiveProfiles > 0 ? "●" : "—";
+        public string ServerStatus => activityStatus ?? (Profiles.Count == 0 ? "미설정" :
+            AnyPartialProfile ? "일부 실행" : ActiveProfiles > 0 ? $"실행 중 {ActiveProfiles}" :
+            AnyFailedProfile ? "실패" : "중지");
+        public Brush IndicatorBrush => activityStatus is not null ? Brushes.DarkOrange :
+            ActiveProfiles > 0 ? Brushes.ForestGreen : Brushes.Gray;
+        public string IndicatorText => ActiveProfiles > 0 ? "●" : "—";
         public string Commit => GitState.Commit;
         public string CommitTime => GitState.CommitTime;
         public string WorkingTree => GitState.WorkingTree;
         public string PushStatus => GitState.PushStatus;
         public string MainMergeStatus => GitState.MainMergeStatus;
-        public string WebAddress => State.WebPort is int port ? $"http://127.0.0.1:{port}" : "—";
-        public string ApiAddress => State.ApiPort is int port ? $"http://127.0.0.1:{port}" : "—";
+        public IReadOnlyList<int> Ports => Context.ProfileManager.ListInstances()
+            .Where(view => view.IsRunning && view.Record.WorktreePath.Equals(Path,
+                StringComparison.OrdinalIgnoreCase)).SelectMany(view => view.Ports)
+            .Distinct().Order().ToArray();
+        public string WebAddress => Ports.Count > 0 ? $"http://127.0.0.1:{Ports[0]}" : "—";
+        public string ApiAddress => Ports.Count > 1 ? $"http://127.0.0.1:{Ports[1]}" : "—";
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -107,16 +107,44 @@ public partial class MainWindow : Window
             (string.IsNullOrWhiteSpace(State.Reason) ? "" : $" · {State.Reason}");
     }
 
+    private sealed record ProcessRow(RepositoryContext Context, ProcessInstanceView View,
+        string WorktreeDisplay)
+    {
+        public string InstanceId => View.Record.InstanceId;
+        public bool CanControl => View.IsRunning;
+        public bool CanRestart => View.Record.Status == RunItemStatus.Running;
+        public string Display
+        {
+            get
+            {
+                var record = View.Record;
+                var ports = View.Ports.Count == 0 ? "" :
+                    "  :" + string.Join(", :", View.Ports);
+                var elapsed = View.IsRunning
+                    ? $"{Math.Max(0, (int)(DateTime.UtcNow - record.StartedUtc).TotalMinutes)}m"
+                    : "";
+                var exit = record.ExitCode is int code ? $" ({code})" : "";
+                return $"{record.ItemName}  ·  {record.ProfileName}  ·  " +
+                    $"{record.Status}{exit}{ports}  {elapsed}" +
+                    (string.IsNullOrWhiteSpace(record.Reason) ? "" : $"  ·  {record.Reason}");
+            }
+        }
+    }
+
     private readonly RepositoryCatalog catalog;
     private readonly List<RepositoryContext> contexts;
     private readonly List<WorktreeRow> allRows = [];
     private readonly ObservableCollection<WorktreeRow> rows = [];
     private readonly ObservableCollection<FilterChoice> filters = [];
+    private readonly ObservableCollection<ProcessRow> processRows = [];
     private readonly DispatcherTimer refreshTimer = new() { Interval = TimeSpan.FromSeconds(8) };
     private readonly DispatcherTimer runTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private string? repositoryError;
     private bool filterUpdating;
     private bool busy;
+    private string? selectedProcessId;
+    private bool closeApproved;
+    private bool closeHandling;
     private bool profileChoiceUpdating;
 
     internal MainWindow(RepositoryCatalog catalog, string? selectedRepository = null)
@@ -126,14 +154,25 @@ public partial class MainWindow : Window
         InitializeComponent();
         WorktreeGrid.ItemsSource = rows;
         RepositoryFilter.ItemsSource = filters;
+        ProcessRepositoryChoice.ItemsSource = contexts;
+        ProcessRepositoryChoice.SelectedItem = contexts.FirstOrDefault(context =>
+            context.Repository.Path.Equals(selectedRepository, StringComparison.OrdinalIgnoreCase))
+            ?? contexts.FirstOrDefault();
+        ProcessList.ItemsSource = processRows;
+        CollectionViewSource.GetDefaultView(processRows).GroupDescriptions.Add(
+            new PropertyGroupDescription(nameof(ProcessRow.WorktreeDisplay)));
         LogStreamChoice.SelectedIndex = 0;
         RebuildFilter(selectedRepository);
         refreshTimer.Tick += async (_, _) => await RefreshAsync();
         runTimer.Tick += (_, _) =>
         {
-            if (WorktreeGrid.SelectedItem is WorktreeRow { IsPixPeek: false } row &&
+            if (WorktreeGrid.SelectedItem is WorktreeRow row &&
                 RunProfileChoice.SelectedItem is RunProfile profile)
                 RefreshRunPanel(row, profile);
+            if (selectedProcessId is not null && processRows.FirstOrDefault(value =>
+                    value.InstanceId == selectedProcessId) is { } selected)
+                LogText.Text = selected.Context.ProfileManager.ReadInstanceLog(selected.View.Record,
+                    LogStreamChoice.SelectedIndex == 1);
         };
         Loaded += async (_, _) =>
         {
@@ -142,6 +181,7 @@ public partial class MainWindow : Window
             runTimer.Start();
         };
         Closed += (_, _) => { refreshTimer.Stop(); runTimer.Stop(); };
+        Closing += MainWindow_Closing;
         UpdateSelection();
     }
 
@@ -153,38 +193,31 @@ public partial class MainWindow : Window
         try
         {
             var selectedPath = (WorktreeGrid.SelectedItem as WorktreeRow)?.Path;
-            var pixPeek = contexts.FirstOrDefault(context => context.Repository.IsPixPeek);
-            var snapshot = ProcessSnapshot.Empty;
             var refreshed = new List<WorktreeRow>();
             var errors = new List<string>();
-            if (pixPeek is not null)
-            {
-                try { snapshot = await pixPeek.Manager.InspectAsync(); }
-                catch (Exception error) { errors.Add($"PixPeek 서버 상태: {error.Message}"); }
-            }
             foreach (var context in contexts)
             {
                 try
                 {
-                    var worktrees = await context.Manager.ListWorktreesAsync();
+                    var worktrees = await context.Worktrees.ListWorktreesAsync();
                     var gitStates = await context.Git.GetStatesAsync(worktrees);
                     RepositoryCommandSettings? commandSettings = null;
-                    if (!context.Repository.IsPixPeek)
+                    try
                     {
-                        try { commandSettings = context.CommandStore.Load(); }
-                        catch (Exception error)
-                        {
-                            errors.Add($"{context.Repository.Name} 명령 설정: {error.Message}");
-                        }
+                        PixPeekLegacyMigration.Ensure(context.Repository.Path, worktrees,
+                            context.CommandStore);
+                        commandSettings = context.CommandStore.Load();
+                        context.ProfileManager.PruneHistory();
+                    }
+                    catch (Exception error)
+                    {
+                        errors.Add($"{context.Repository.Name} 명령 설정: {error.Message}");
                     }
                     for (var index = 0; index < worktrees.Count; index++)
                     {
-                        var state = context.Repository.IsPixPeek
-                            ? context.Manager.GetState(worktrees[index], snapshot)
-                            : new WorktreeState("미설정", null, null, false, false, null);
                         var profiles = commandSettings?.EffectiveProfiles(worktrees[index].Path);
                         var selectedProfile = commandSettings?.SelectedProfile(worktrees[index].Path);
-                        refreshed.Add(new WorktreeRow(context, worktrees[index], state,
+                        refreshed.Add(new WorktreeRow(context, worktrees[index],
                             gitStates[index], profiles, selectedProfile));
                     }
                 }
@@ -206,6 +239,7 @@ public partial class MainWindow : Window
         {
             busy = false;
             UpdateSelection();
+            RefreshProcesses();
         }
     }
 
@@ -235,45 +269,6 @@ public partial class MainWindow : Window
         UpdateSelection();
     }
 
-    private async Task<bool> RunActionAsync(WorktreeRow selected,
-        Func<Worktree, ProcessSnapshot, Task> action, string? activityStatus = null)
-    {
-        if (busy || !selected.IsPixPeek) return false;
-        var manager = selected.Context.Manager;
-        busy = true;
-        selected.SetActivity(activityStatus);
-        ToggleButtons(false);
-        UpdateSelection();
-        try
-        {
-            var snapshot = await manager.InspectAsync();
-            try
-            {
-                await action(selected.Worktree, snapshot);
-            }
-            catch (PixPeekPortConflictException conflict)
-            {
-                if (new PortConflictDialog(conflict) { Owner = this }.ShowDialog() != true)
-                    return false;
-                await manager.TerminateConflictingPixPeekAsync(conflict);
-                await action(selected.Worktree, await manager.InspectAsync());
-            }
-            return true;
-        }
-        catch (Exception error)
-        {
-            MessageBox.Show(this, error.Message, "PixPeek Dev Manager",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-            return false;
-        }
-        finally
-        {
-            busy = false;
-            await RefreshAsync();
-            selected.SetActivity(null);
-        }
-    }
-
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await RefreshAsync();
 
     private void RepositoryFilter_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -292,6 +287,10 @@ public partial class MainWindow : Window
             if (!contexts.Any(context => context.Repository.Path.Equals(
                     repository.Path, StringComparison.OrdinalIgnoreCase)))
                 contexts.Add(new RepositoryContext(repository));
+            ProcessRepositoryChoice.ItemsSource = null;
+            ProcessRepositoryChoice.ItemsSource = contexts;
+            ProcessRepositoryChoice.SelectedItem = contexts.First(context =>
+                context.Repository.Path.Equals(repository.Path, StringComparison.OrdinalIgnoreCase));
             RebuildFilter(repository.Path);
             await RefreshAsync();
         }
@@ -368,7 +367,7 @@ public partial class MainWindow : Window
 
     private async void RunProfiles_Click(object sender, RoutedEventArgs e)
     {
-        if (busy || WorktreeGrid.SelectedItem is not WorktreeRow row || row.IsPixPeek) return;
+        if (busy || WorktreeGrid.SelectedItem is not WorktreeRow row) return;
         try
         {
             if (new RunProfilesDialog(row.Context.Repository.Path, row.Path,
@@ -385,7 +384,7 @@ public partial class MainWindow : Window
     private async void RunProfileChoice_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (profileChoiceUpdating || busy || WorktreeGrid.SelectedItem is not WorktreeRow row ||
-            row.IsPixPeek || RunProfileChoice.SelectedItem is not RunProfile profile) return;
+            RunProfileChoice.SelectedItem is not RunProfile profile) return;
         try
         {
             var settings = row.Context.CommandStore.Load();
@@ -402,30 +401,18 @@ public partial class MainWindow : Window
 
     private async Task StartRowAsync(WorktreeRow row)
     {
-        if (!row.IsPixPeek)
-        {
-            await RunProfileActionAsync(row, start: true);
-            return;
-        }
-        if (!await RunActionAsync(row, row.Context.Manager.StartAsync, activityStatus: "전환 중")) return;
-        try { OpenPwa(); }
-        catch (Exception error)
-        {
-            MessageBox.Show(this, error.Message, "PixPeek Dev Manager",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-        }
+        await RunProfileActionAsync(row, start: true);
     }
 
     private async Task StopRowAsync(WorktreeRow row)
     {
-        if (!row.IsPixPeek) await RunProfileActionAsync(row, start: false);
-        else await RunActionAsync(row, (worktree, _) => row.Context.Manager.StopAsync(worktree));
+        await RunProfileActionAsync(row, start: false);
     }
 
     private async Task RunProfileActionAsync(WorktreeRow row, bool start)
     {
         var profile = RunProfileChoice.SelectedItem as RunProfile ?? row.SelectedProfile;
-        if (busy || row.IsPixPeek || profile is null ||
+        if (busy || profile is null ||
             start && !profile.Items.Any(item => item.Enabled)) return;
         if (start && !ConfirmPortConflicts(row, profile)) return;
         busy = true;
@@ -468,7 +455,7 @@ public partial class MainWindow : Window
 
     private async Task RunItemActionAsync(Func<WorktreeRow, RunProfile, RunItem, Task> action)
     {
-        if (busy || WorktreeGrid.SelectedItem is not WorktreeRow row || row.IsPixPeek ||
+        if (busy || WorktreeGrid.SelectedItem is not WorktreeRow row ||
             (RunProfileChoice.SelectedItem as RunProfile ?? row.SelectedProfile) is not { } profile ||
             RunItemList.SelectedItem is not RunItemRow selected) return;
         busy = true;
@@ -506,22 +493,153 @@ public partial class MainWindow : Window
     private void LogStreamChoice_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
         UpdateRunItemSelection();
 
+    private void ProcessRepositoryChoice_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+        RefreshProcesses();
+
+    private void RefreshProcesses()
+    {
+        if (ProcessRepositoryChoice?.SelectedItem is not RepositoryContext context) return;
+        try
+        {
+            var branchByPath = allRows.Where(row => row.Context == context)
+                .ToDictionary(row => row.Path, row => row.Branch,
+                    StringComparer.OrdinalIgnoreCase);
+            var snapshots = context.ProfileManager.ListInstances();
+            processRows.Clear();
+            foreach (var snapshot in snapshots)
+            {
+                var path = snapshot.Record.WorktreePath;
+                var branch = branchByPath.GetValueOrDefault(path) ?? System.IO.Path.GetFileName(path);
+                processRows.Add(new ProcessRow(context, snapshot, $"{branch}  ·  {path}"));
+            }
+            ProcessCountText.Text = $"{snapshots.Count(view => view.IsRunning)} running";
+            ProcessStopAllButton.IsEnabled = !busy && snapshots.Any(view => view.IsRunning);
+            ProcessRestartAllButton.IsEnabled = !busy && snapshots.Any(view =>
+                view.Record.Status == RunItemStatus.Running &&
+                view.Record.Lifecycle == RunLifecycle.LongRunning);
+            ProcessClearHistoryButton.IsEnabled = !busy && snapshots.Any(view => !view.IsRunning);
+        }
+        catch (Exception error)
+        {
+            ProcessCountText.Text = "프로세스 상태 확인 실패: " + error.Message;
+        }
+    }
+
+    private void ProcessLogs_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is not ProcessRow row) return;
+        selectedProcessId = row.InstanceId;
+        LogText.Text = row.Context.ProfileManager.ReadInstanceLog(row.View.Record,
+            LogStreamChoice.SelectedIndex == 1);
+    }
+
+    private async Task ProcessActionAsync(Func<Task> action)
+    {
+        if (busy) return;
+        busy = true;
+        ToggleButtons(false);
+        try { await action(); }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, error.Message, "프로세스 제어 실패",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally { busy = false; await RefreshAsync(); }
+    }
+
+    private async void ProcessRestart_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is ProcessRow row)
+            await ProcessActionAsync(() => row.Context.ProfileManager.RestartInstanceAsync(
+                row.InstanceId, row.Context.CommandStore.Load()));
+    }
+
+    private async void ProcessStop_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is ProcessRow row)
+            await ProcessActionAsync(() =>
+                row.Context.ProfileManager.StopInstanceAsync(row.InstanceId));
+    }
+
+    private async void ProcessKill_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button)?.Tag is ProcessRow row)
+            await ProcessActionAsync(() =>
+                row.Context.ProfileManager.StopInstanceAsync(row.InstanceId, force: true));
+    }
+
+    private async void ProcessStopAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (ProcessRepositoryChoice.SelectedItem is RepositoryContext context)
+            await ProcessActionAsync(() =>
+                context.ProfileManager.StopRunningAsync());
+    }
+
+    private async void ProcessRestartAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (ProcessRepositoryChoice.SelectedItem is RepositoryContext context)
+            await ProcessActionAsync(() =>
+                context.ProfileManager.RestartRunningAsync(context.CommandStore.Load()));
+    }
+
+    private void ProcessClearHistory_Click(object sender, RoutedEventArgs e)
+    {
+        if (ProcessRepositoryChoice.SelectedItem is not RepositoryContext context) return;
+        if (MessageBox.Show(this, $"{context.Repository.Name}의 종료 이력과 로그를 삭제할까요?",
+                "이력 삭제", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            return;
+        context.ProfileManager.ClearHistory();
+        RefreshProcesses();
+    }
+
+    private async void MainWindow_Closing(object? sender, CancelEventArgs e)
+    {
+        if (closeApproved) return;
+        ShutdownEntry[] running;
+        try
+        {
+            running = contexts.SelectMany(context => context.ProfileManager.ListInstances()
+                .Where(view => view.IsRunning)
+                .Select(view => new ShutdownEntry(context.Repository.Name,
+                    context.ProfileManager, view))).ToArray();
+        }
+        catch (Exception error)
+        {
+            e.Cancel = true;
+            MessageBox.Show(this, error.Message, "프로세스 상태 확인 실패",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+        if (running.Length == 0) return;
+        e.Cancel = true;
+        if (closeHandling) return;
+        var dialog = new ProcessShutdownDialog(running) { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+        closeHandling = true;
+        try
+        {
+            foreach (var entry in dialog.SelectedEntries)
+                await entry.Manager.StopInstanceAsync(entry.Instance.Record.InstanceId);
+            closeApproved = true;
+            Close();
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, error.Message + "\n남아 있는 프로세스를 확인한 뒤 다시 닫아 주세요.",
+                "프로세스 종료 실패", MessageBoxButton.OK, MessageBoxImage.Error);
+            RefreshProcesses();
+        }
+        finally { closeHandling = false; }
+    }
+
     private async Task RestartRowAsync(WorktreeRow row) =>
-        await RunActionAsync(row, row.Context.Manager.RebuildAndRestartAsync, activityStatus: "재시작 중");
+        await RunProfileActionAsync(row, start: true);
 
     private void OpenRow(WorktreeRow row)
     {
-        if (busy || !row.IsPixPeek || row.State.WebPort is not int port) return;
-        if (row.State.Managed && port == DevServerManager.PwaPort) OpenPwa();
-        else Process.Start(new ProcessStartInfo($"http://127.0.0.1:{port}") { UseShellExecute = true });
-    }
-
-    private void OpenPwa()
-    {
-        if (ChromePwaLauncher.Open()) return;
-        MessageBox.Show(this,
-            "PixPeek을 Chrome에서 열었습니다. 주소창의 설치 아이콘으로 앱을 한 번 설치하면 다음부터 실행 버튼이 설치된 PWA를 엽니다.",
-            "PixPeek PWA 설치", MessageBoxButton.OK, MessageBoxImage.Information);
+        if (busy || row.Ports.Count == 0) return;
+        var port = row.Ports[0];
+        Process.Start(new ProcessStartInfo($"http://127.0.0.1:{port}") { UseShellExecute = true });
     }
 
     private void WorktreeGrid_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -579,13 +697,12 @@ public partial class MainWindow : Window
     private void WorktreeContextMenu_Opened(object sender, RoutedEventArgs e)
     {
         if (sender is not ContextMenu menu || menu.DataContext is not WorktreeRow row) return;
-        ((MenuItem)menu.Items[0]).Header = row.IsPixPeek ? "전환" : "Run All / Restart All";
-        ((MenuItem)menu.Items[2]).Header = row.IsPixPeek ? "종료" : "Stop All";
-        ((MenuItem)menu.Items[0]).IsEnabled = !busy && (row.IsPixPeek || row.HasRunnableProfile);
+        ((MenuItem)menu.Items[0]).Header = "Run All / Restart All";
+        ((MenuItem)menu.Items[2]).Header = "Stop All";
+        ((MenuItem)menu.Items[0]).IsEnabled = !busy && row.HasRunnableProfile;
         ((MenuItem)menu.Items[1]).IsEnabled = !busy && CanRestart(row);
-        ((MenuItem)menu.Items[2]).IsEnabled = !busy && (row.IsPixPeek
-            ? row.State.HasProcesses : row.SelectedProfile is { } profile &&
-                row.Context.ProfileManager.HasActiveItems(row.Path, profile));
+        ((MenuItem)menu.Items[2]).IsEnabled = !busy && row.SelectedProfile is { } profile &&
+            row.Context.ProfileManager.HasActiveItems(row.Path, profile);
         ((MenuItem)menu.Items[3]).IsEnabled = !busy && CanOpen(row);
         ((MenuItem)menu.Items[5]).IsEnabled = !busy && CanCommit(row);
         ((MenuItem)menu.Items[6]).IsEnabled = !busy && CanMerge(row);
@@ -633,7 +750,7 @@ public partial class MainWindow : Window
     private async Task RunGitActionAsync(WorktreeRow row, GitAction action)
     {
         if (busy) return;
-        var manager = row.Context.Manager;
+        var manager = row.Context.Worktrees;
         var gitActions = row.Context.GitActions;
         var baseBranch = row.Context.BaseBranch;
         busy = true;
@@ -714,12 +831,10 @@ public partial class MainWindow : Window
         }
     }
 
-    private static bool CanOpen(WorktreeRow row) =>
-        row.IsPixPeek && row.State.WebPort is not null &&
-        row.State.Status is ("실행 중" or "외부 실행");
+    private static bool CanOpen(WorktreeRow row) => row.Ports.Count > 0;
 
-    private static bool CanRestart(WorktreeRow row) =>
-        row.IsPixPeek && row.State.Status is "실행 중" or "외부 실행";
+    private static bool CanRestart(WorktreeRow row) => row.SelectedProfile is { } profile &&
+        row.Context.ProfileManager.HasActiveItems(row.Path, profile);
 
     private static bool HasWorkBranch(WorktreeRow row) =>
         row.GitState.Error is null && row.Branch != row.Context.BaseBranch &&
@@ -744,7 +859,7 @@ public partial class MainWindow : Window
         AddRepositoryButton.IsEnabled = !busy;
         LocalModelButton.IsEnabled = !busy;
         CommandSettingsButton.IsEnabled = !busy && WorktreeGrid.SelectedItem is WorktreeRow;
-        RunProfilesButton.IsEnabled = !busy && WorktreeGrid.SelectedItem is WorktreeRow { IsPixPeek: false };
+        RunProfilesButton.IsEnabled = !busy && WorktreeGrid.SelectedItem is WorktreeRow;
         RepositoryFilter.IsEnabled = !busy;
         FetchButton.IsEnabled = !busy && contexts.Count > 0;
         if (WorktreeGrid.SelectedItem is not WorktreeRow row)
@@ -762,43 +877,23 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (row.IsPixPeek)
-        {
-            RunProfileLabel.Visibility = Visibility.Collapsed;
-            RunProfileChoice.Visibility = Visibility.Collapsed;
-            RunItemsPanel.Visibility = Visibility.Collapsed;
-            StartButton.Content = "실행/전환";
-            StopButton.Content = "종료";
-            var origin = row.ServerStatus == "재시작 중" ? "선택한 워크트리를 리빌드하고 재시작 중" :
-                row.ServerStatus == "전환 중" ? "선택한 워크트리로 전환 중" :
-                row.State.Managed ? "Dev Manager에서 실행 중" :
-                row.State.HasProcesses ? "다른 터미널에서 실행 중" : "중지";
-            DetailsText.Text = $"{row.Context.Repository.Name} · {row.Path}\n{origin} · 실행/전환을 누르면 기존 PixPeek 서버를 종료하고 선택한 워크트리의 Full 개발 PWA를 실행합니다.\n{row.GitState.Details}";
-            LogText.Text = row.State.HasProcesses && !row.State.Managed
-                ? "다른 터미널에서 시작한 서버의 로그는 여기서 수집하지 않습니다."
-                : row.Context.Manager.ReadRecentLog(row.Worktree);
-        }
-        else
-        {
-            RunProfileLabel.Visibility = Visibility.Visible;
-            RunProfileChoice.Visibility = Visibility.Visible;
-            RunItemsPanel.Visibility = Visibility.Visible;
-            profileChoiceUpdating = true;
-            RunProfileChoice.ItemsSource = row.Profiles;
-            RunProfileChoice.SelectedItem = row.SelectedProfile;
-            profileChoiceUpdating = false;
-            var profile = row.SelectedProfile;
-            var summary = profile is null ? "Run Profile이 없습니다. 프로필 설정에서 추가하세요." :
-                $"{profile.Name} · {ProfileStatusText(row.Context.ProfileManager.GetProfileStatus(row.Path, profile))}";
-            DetailsText.Text = $"{row.Context.Repository.Name} · {row.Path}\n{summary}\n{row.GitState.Details}";
-            if (profile is not null) RefreshRunPanel(row, profile);
-            else RunItemList.ItemsSource = null;
-        }
+        RunProfileLabel.Visibility = Visibility.Visible;
+        RunProfileChoice.Visibility = Visibility.Visible;
+        RunItemsPanel.Visibility = Visibility.Visible;
+        profileChoiceUpdating = true;
+        RunProfileChoice.ItemsSource = row.Profiles;
+        RunProfileChoice.SelectedItem = row.SelectedProfile;
+        profileChoiceUpdating = false;
+        var selectedProfile = row.SelectedProfile;
+        var summary = selectedProfile is null ? "Run Profile이 없습니다. 프로필 설정에서 추가하세요." :
+            $"{selectedProfile.Name} · {ProfileStatusText(row.Context.ProfileManager.GetProfileStatus(row.Path, selectedProfile))}";
+        DetailsText.Text = $"{row.Context.Repository.Name} · {row.Path}\n{summary}\n{row.GitState.Details}";
+        if (selectedProfile is not null) RefreshRunPanel(row, selectedProfile);
+        else RunItemList.ItemsSource = null;
         if (repositoryError is not null) DetailsText.Text += $"\n저장소 확인 실패: {repositoryError}";
-        StartButton.IsEnabled = !busy && (row.IsPixPeek || row.HasRunnableProfile);
-        StopButton.IsEnabled = !busy && (row.IsPixPeek
-            ? row.State.HasProcesses : row.SelectedProfile is { } selected &&
-                row.Context.ProfileManager.HasActiveItems(row.Path, selected));
+        StartButton.IsEnabled = !busy && row.HasRunnableProfile;
+        StopButton.IsEnabled = !busy && row.SelectedProfile is { } selected &&
+            row.Context.ProfileManager.HasActiveItems(row.Path, selected);
         OpenButton.IsEnabled = !busy && CanOpen(row);
     }
 
@@ -820,7 +915,14 @@ public partial class MainWindow : Window
 
     private void UpdateRunItemSelection()
     {
-        if (WorktreeGrid.SelectedItem is not WorktreeRow { IsPixPeek: false } row ||
+        if (selectedProcessId is not null && processRows.FirstOrDefault(value =>
+                value.InstanceId == selectedProcessId) is { } process)
+        {
+            LogText.Text = process.Context.ProfileManager.ReadInstanceLog(process.View.Record,
+                LogStreamChoice.SelectedIndex == 1);
+            return;
+        }
+        if (WorktreeGrid.SelectedItem is not WorktreeRow row ||
             (RunProfileChoice.SelectedItem as RunProfile ?? row.SelectedProfile) is not { } profile ||
             RunItemList.SelectedItem is not RunItemRow selected)
         {

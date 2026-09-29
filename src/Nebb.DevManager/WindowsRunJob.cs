@@ -8,11 +8,8 @@ namespace Nebb.DevManager;
 internal static class WindowsRunJob
 {
     private const uint QueryAndTerminate = 0x0004 | 0x0008;
-    private const uint KillOnClose = 0x00002000;
-    // Keep each job handle open until stop or app exit; npm can outlive its launcher.
+    // The launched root also holds an inheritable handle so its named job can be reopened.
     private static readonly Dictionary<string, SafeFileHandle> HeldJobs = new(StringComparer.Ordinal);
-
-    static WindowsRunJob() => AppDomain.CurrentDomain.ProcessExit += (_, _) => TerminateAll();
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Accounting
@@ -25,42 +22,6 @@ internal static class WindowsRunJob
         public uint TotalProcesses;
         public uint ActiveProcesses;
         public uint TotalTerminatedProcesses;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BasicLimits
-    {
-        public long PerProcessUserTimeLimit;
-        public long PerJobUserTimeLimit;
-        public uint LimitFlags;
-        public UIntPtr MinimumWorkingSetSize;
-        public UIntPtr MaximumWorkingSetSize;
-        public uint ActiveProcessLimit;
-        public UIntPtr Affinity;
-        public uint PriorityClass;
-        public uint SchedulingClass;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct IoCounters
-    {
-        public ulong ReadOperationCount;
-        public ulong WriteOperationCount;
-        public ulong OtherOperationCount;
-        public ulong ReadTransferCount;
-        public ulong WriteTransferCount;
-        public ulong OtherTransferCount;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ExtendedLimits
-    {
-        public BasicLimits BasicLimitInformation;
-        public IoCounters IoInfo;
-        public UIntPtr ProcessMemoryLimit;
-        public UIntPtr JobMemoryLimit;
-        public UIntPtr PeakProcessMemoryUsed;
-        public UIntPtr PeakJobMemoryUsed;
     }
 
     [DllImport("kernel32.dll", EntryPoint = "CreateJobObjectW", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -82,9 +43,9 @@ internal static class WindowsRunJob
     private static extern bool QueryInformationJobObject(SafeFileHandle job, int infoClass,
         out Accounting information, int length, IntPtr returnLength);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetInformationJobObject(SafeFileHandle job, int infoClass,
-        ref ExtendedLimits information, int length);
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "QueryInformationJobObject")]
+    private static extern bool QueryProcessIds(SafeFileHandle job, int infoClass,
+        IntPtr information, int length, IntPtr returnLength);
 
     public static SafeFileHandle Create(string name)
     {
@@ -105,14 +66,6 @@ internal static class WindowsRunJob
                 job.Dispose();
                 throw new InvalidOperationException("이미 실행 중인 프로세스 그룹이 있습니다.");
             }
-            var limits = new ExtendedLimits
-                { BasicLimitInformation = new BasicLimits { LimitFlags = KillOnClose } };
-            if (!SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf<ExtendedLimits>()))
-            {
-                var error = Marshal.GetLastWin32Error();
-                job.Dispose();
-                throw new Win32Exception(error, "실행 프로세스 종료 정책을 설정할 수 없습니다.");
-            }
             HeldJobs[name] = job;
             return job;
         }
@@ -130,6 +83,43 @@ internal static class WindowsRunJob
             if (HeldJobs.TryGetValue(name, out var held)) return ActiveProcesses(held) > 0;
         using var job = OpenJobObject(QueryAndTerminate, false, name);
         return !job.IsInvalid && ActiveProcesses(job) > 0;
+    }
+
+    public static IReadOnlyList<int>? ProcessIds(string name)
+    {
+        lock (HeldJobs)
+            if (HeldJobs.TryGetValue(name, out var held)) return ReadProcessIds(held);
+        using var job = OpenJobObject(QueryAndTerminate, false, name);
+        return job.IsInvalid ? null : ReadProcessIds(job);
+    }
+
+    private static IReadOnlyList<int> ReadProcessIds(SafeFileHandle job)
+    {
+        // JOBOBJECT_BASIC_PROCESS_ID_LIST: two DWORD counts followed by ULONG_PTR entries.
+        var capacity = 16;
+        while (true)
+        {
+            var size = 8 + capacity * IntPtr.Size;
+            var buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                if (QueryProcessIds(job, 3, buffer, size, IntPtr.Zero))
+                {
+                    var count = Marshal.ReadInt32(buffer, 4);
+                    var result = new int[count];
+                    for (var index = 0; index < count; index++)
+                        result[index] = IntPtr.Size == 8
+                            ? checked((int)Marshal.ReadInt64(buffer, 8 + index * 8))
+                            : Marshal.ReadInt32(buffer, 8 + index * 4);
+                    return result;
+                }
+                var error = Marshal.GetLastWin32Error();
+                if (error != 234 || capacity >= 16384)
+                    throw new Win32Exception(error, "프로세스 그룹 목록을 읽을 수 없습니다.");
+                capacity *= 2;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
     }
 
     public static bool ContainsProcess(string name, int processId)
@@ -172,14 +162,13 @@ internal static class WindowsRunJob
         return true;
     }
 
-    public static void TerminateAll()
+    public static void ReleaseIfEmpty(string name)
     {
-        string[] names;
-        lock (HeldJobs) names = HeldJobs.Keys.ToArray();
-        foreach (var name in names)
+        lock (HeldJobs)
         {
-            try { Terminate(name); }
-            catch { /* Continue stopping the remaining run commands during shutdown. */ }
+            if (!HeldJobs.TryGetValue(name, out var job) || ActiveProcesses(job) != 0) return;
+            HeldJobs.Remove(name);
+            job.Dispose();
         }
     }
 

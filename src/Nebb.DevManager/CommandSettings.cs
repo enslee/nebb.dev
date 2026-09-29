@@ -108,6 +108,8 @@ internal sealed class RepositoryCommandSettings
         new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string> SelectedProfiles { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> LegacyPixPeekMigratedWorktrees { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<RunProfile> EffectiveProfiles(string worktreePath) =>
         ProfileOverrides.GetValueOrDefault(Path.GetFullPath(worktreePath)) ?? DefaultProfiles;
@@ -197,6 +199,8 @@ internal sealed class CommandSettingsStore
             loaded.ProfileOverrides ?? [], StringComparer.OrdinalIgnoreCase);
         loaded.SelectedProfiles = new Dictionary<string, string>(
             loaded.SelectedProfiles ?? [], StringComparer.OrdinalIgnoreCase);
+        loaded.LegacyPixPeekMigratedWorktrees = new HashSet<string>(
+            loaded.LegacyPixPeekMigratedWorktrees ?? [], StringComparer.OrdinalIgnoreCase);
         if (loaded.Version == 1) MigrateLegacyRuns(loaded);
         foreach (var profile in loaded.DefaultProfiles.Concat(loaded.ProfileOverrides.Values.SelectMany(list => list)))
         {

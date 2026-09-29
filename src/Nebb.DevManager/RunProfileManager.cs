@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.ComponentModel;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -8,7 +9,8 @@ namespace Nebb.DevManager;
 
 internal enum RunItemStatus
 {
-    Idle, Starting, WaitingReady, Running, Completed, Failed, Stopping, Stopped
+    Idle, Starting, WaitingReady, Running, Completed, Failed, Stopping, Stopped,
+    Exited, Unknown
 }
 
 internal enum RunProfileStatus
@@ -19,9 +21,33 @@ internal enum RunProfileStatus
 internal sealed record RunItemState(string ItemId, RunItemStatus Status, string? Reason,
     int? ProcessId, int? ExitCode, string? InstanceId);
 
+internal sealed record ProcessInstanceView(RunInstanceRecord Record, IReadOnlyList<int> Ports)
+{
+    public bool IsRunning => Record.Status is RunItemStatus.Starting or
+        RunItemStatus.WaitingReady or RunItemStatus.Running or RunItemStatus.Stopping;
+}
+
 internal sealed record RunInstanceRecord(string InstanceId, string WorktreePath,
     string ProfileId, string ItemId, int? ProcessId, DateTime StartedUtc,
-    DateTime? EndedUtc, RunItemStatus Status, int? ExitCode, string? Reason);
+    DateTime? EndedUtc, RunItemStatus Status, int? ExitCode, string? Reason)
+{
+    public string? JobName { get; init; }
+    public string RepositoryPath { get; init; } = "";
+    public string RepositoryId { get; init; } = "";
+    public string WorktreeId { get; init; } = "";
+    public string ProfileName { get; init; } = "";
+    public string ItemName { get; init; } = "";
+    public RunLifecycle Lifecycle { get; init; } = RunLifecycle.LongRunning;
+    public string Command { get; init; } = "";
+    public string Arguments { get; init; } = "";
+    public string WorkingDirectory { get; init; } = "";
+    public string ExecutablePath { get; init; } = "";
+    public string CommandLine { get; init; } = "";
+    public string[] EnvironmentNames { get; init; } = [];
+    public string EncryptedEnvironment { get; init; } = "";
+    public int[] DetectedPorts { get; init; } = [];
+    public string LogSessionId => InstanceId;
+}
 
 internal sealed class RunProfileManager
 {
@@ -34,10 +60,9 @@ internal sealed class RunProfileManager
         public required RunItem Item { get; init; }
         public string ProfileName { get; init; } = "";
         public Process? Process { get; set; }
-        public Task StdoutTask { get; set; } = Task.CompletedTask;
-        public Task StderrTask { get; set; } = Task.CompletedTask;
         public Task? MonitorTask { get; set; }
         public bool Ready { get; set; }
+        public bool Reconnected { get; set; }
     }
 
     private readonly string stateRoot;
@@ -58,14 +83,88 @@ internal sealed class RunProfileManager
     {
         var key = Key(worktreePath, profile.Id, item.Id);
         lock (sync)
-            if (instances.TryGetValue(key, out var active)) return View(active.Record);
+            if (instances.TryGetValue(key, out var active)) return View(Reconcile(active));
         var record = ReadLatest(worktreePath, profile.Id, item.Id);
         if (record is null) return new(item.Id, RunItemStatus.Idle, null, null, null, null);
-        if (record.Status is RunItemStatus.Starting or RunItemStatus.WaitingReady or
-            RunItemStatus.Running or RunItemStatus.Stopping)
-            record = record with { Status = RunItemStatus.Stopped,
-                Reason = "이전 앱 실행이 종료되었습니다." };
-        return View(record);
+        var instance = new Instance { Key = key, JobName = record.JobName ?? "",
+            Folder = ItemFolder(worktreePath, profile.Id, item.Id), Record = record,
+            Item = item, ProfileName = profile.Name };
+        lock (sync) instances[key] = instance;
+        return View(Reconcile(instance));
+    }
+
+    private RunInstanceRecord Reconcile(Instance instance)
+    {
+        var record = instance.Record;
+        if (!IsActive(record.Status) || instance.MonitorTask is not null) return record;
+        if (string.IsNullOrWhiteSpace(record.JobName))
+        {
+            Set(instance, RunItemStatus.Stopped, reason: "이전 버전의 실행 기록입니다.");
+            return instance.Record;
+        }
+        IReadOnlyList<int>? members;
+        try { members = WindowsRunJob.ProcessIds(record.JobName); }
+        catch (Win32Exception error)
+        {
+            Set(instance, RunItemStatus.Unknown, reason: error.Message);
+            return instance.Record;
+        }
+        if (members is null || members.Count == 0)
+        {
+            WindowsRunJob.ReleaseIfEmpty(record.JobName);
+            var exitCodePath = Path.Combine(instance.Folder, record.InstanceId, "exit.code");
+            var exitCode = File.Exists(exitCodePath) &&
+                int.TryParse(File.ReadAllText(exitCodePath).Trim(), out var code) ? code : (int?)null;
+            var status = record.Status == RunItemStatus.Stopping ? RunItemStatus.Stopped :
+                record.Lifecycle == RunLifecycle.OneShot
+                    ? exitCode == 0 ? RunItemStatus.Completed : RunItemStatus.Failed
+                    : RunItemStatus.Exited;
+            Set(instance, status, exitCode: exitCode,
+                reason: exitCode is null ? "프로세스가 종료되었습니다. 종료 코드는 확인할 수 없습니다." : null);
+            return instance.Record;
+        }
+        if (record.ProcessId is int rootPid && members.Contains(rootPid) && !instance.Reconnected)
+        {
+            try
+            {
+                using var root = Process.GetProcessById(rootPid);
+                var sameStart = Math.Abs((root.StartTime.ToUniversalTime() - record.StartedUtc)
+                    .TotalSeconds) < 2;
+                var sameExecutable = string.Equals(root.MainModule?.FileName,
+                    record.ExecutablePath, StringComparison.OrdinalIgnoreCase);
+                var commandLine = ProcessCommandLine.Read(rootPid);
+                var sameCommand = string.Equals(commandLine, record.CommandLine,
+                    StringComparison.OrdinalIgnoreCase);
+                if (!sameStart || !sameExecutable || !sameCommand)
+                {
+                    Set(instance, RunItemStatus.Unknown,
+                        reason: "Stale/Detached: 시작 시각, 실행 파일 또는 명령줄이 일치하지 않습니다.");
+                    return instance.Record;
+                }
+                instance.Reconnected = true;
+            }
+            catch (Exception error) when (error is ArgumentException or InvalidOperationException or
+                System.ComponentModel.Win32Exception)
+            {
+                Set(instance, RunItemStatus.Unknown, reason: "Stale/Detached: " + error.Message);
+                return instance.Record;
+            }
+        }
+        else if (record.ProcessId is int pid && !members.Contains(pid) && !instance.Reconnected)
+        {
+            try
+            {
+                using var root = Process.GetProcessById(pid);
+                Set(instance, RunItemStatus.Unknown,
+                    reason: "Stale/Detached: 기록된 PID가 다른 프로세스에 사용 중입니다.");
+                return instance.Record;
+            }
+            catch (ArgumentException) { /* Root exited; its children may still be in the named job. */ }
+            instance.Reconnected = true;
+        }
+        if (record.Status is RunItemStatus.Starting or RunItemStatus.WaitingReady or RunItemStatus.Stopping)
+            Set(instance, RunItemStatus.Running);
+        return instance.Record;
     }
 
     public RunProfileStatus GetProfileStatus(string worktreePath, RunProfile profile)
@@ -86,8 +185,121 @@ internal sealed class RunProfileManager
     public bool HasActiveItems(string worktreePath, RunProfile profile) =>
         profile.Items.Any(item => IsActive(GetItemState(worktreePath, profile, item).Status));
 
+    public IReadOnlyList<ProcessInstanceView> ListInstances()
+    {
+        if (!Directory.Exists(stateRoot)) return [];
+        var records = new Dictionary<string, RunInstanceRecord>(StringComparer.Ordinal);
+        foreach (var file in Directory.EnumerateFiles(stateRoot, "instance.json",
+                     SearchOption.AllDirectories))
+        {
+            var record = ReadRecord(file);
+            if (record is not null) records[record.InstanceId] = record;
+        }
+        foreach (var file in Directory.EnumerateFiles(stateRoot, "latest.json",
+                     SearchOption.AllDirectories))
+        {
+            var record = ReadRecord(file);
+            if (record is null) continue;
+            var key = Key(record.WorktreePath, record.ProfileId, record.ItemId);
+            Instance instance;
+            lock (sync)
+            {
+                if (!instances.TryGetValue(key, out instance!))
+                {
+                    var item = new RunItem { Id = record.ItemId, Name = record.ItemName,
+                        Lifecycle = record.Lifecycle };
+                    instance = new Instance { Key = key, JobName = record.JobName ?? "",
+                        Folder = Path.GetDirectoryName(file)!, Record = record, Item = item,
+                        ProfileName = record.ProfileName };
+                    instances[key] = instance;
+                }
+            }
+            records[record.InstanceId] = Reconcile(instance);
+        }
+        var allPorts = ListeningPorts.All();
+        var recentEnded = records.Values.Where(record => !IsActive(record.Status))
+            .OrderByDescending(record => record.StartedUtc).Take(20)
+            .Select(record => record.InstanceId).ToHashSet(StringComparer.Ordinal);
+        return records.Values.OrderByDescending(record => IsActive(record.Status))
+            .ThenByDescending(record => record.StartedUtc)
+            .Where(record => IsActive(record.Status) || recentEnded.Contains(record.InstanceId))
+            .Select(record =>
+            {
+                var members = IsActive(record.Status) && record.JobName is not null
+                    ? WindowsRunJob.ProcessIds(record.JobName) : null;
+                int[] ports = members is null ? record.DetectedPorts : allPorts
+                    .Where(pair => members.Contains(pair.ProcessId))
+                    .Select(pair => pair.Port).Distinct().Order().ToArray();
+                if (!record.DetectedPorts.SequenceEqual(ports))
+                {
+                    record = record with { DetectedPorts = ports };
+                    var key = Key(record.WorktreePath, record.ProfileId, record.ItemId);
+                    lock (sync)
+                        if (instances.TryGetValue(key, out var current) &&
+                            current.Record.InstanceId == record.InstanceId)
+                        {
+                            current.Record = record;
+                            Save(current);
+                        }
+                }
+                return new ProcessInstanceView(record, ports);
+            }).ToArray();
+    }
+
+    public async Task StopInstanceAsync(string instanceId, bool force = false)
+    {
+        var record = ListInstances().Select(view => view.Record)
+            .FirstOrDefault(value => value.InstanceId == instanceId);
+        if (record is null || !IsActive(record.Status)) return;
+        var key = Key(record.WorktreePath, record.ProfileId, record.ItemId);
+        Instance? instance;
+        lock (sync) instances.TryGetValue(key, out instance);
+        if (instance is not null && instance.Record.InstanceId == instanceId)
+            await StopInstanceAsync(instance, force);
+    }
+
+    public async Task RestartInstanceAsync(string instanceId, RepositoryCommandSettings settings)
+    {
+        var record = ListInstances().Select(view => view.Record)
+            .FirstOrDefault(value => value.InstanceId == instanceId);
+        if (record is null || record.Status != RunItemStatus.Running) return;
+        var profile = settings.EffectiveProfiles(record.WorktreePath)
+            .FirstOrDefault(value => value.Id == record.ProfileId)
+            ?? throw new InvalidOperationException("현재 설정에서 프로필을 찾을 수 없습니다.");
+        if (!profile.Items.Any(value => value.Id == record.ItemId))
+            throw new InvalidOperationException("현재 설정에서 실행 항목을 찾을 수 없습니다.");
+        await RestartItemAsync(record.WorktreePath, profile, record.ItemId);
+    }
+
+    public async Task RestartRunningAsync(RepositoryCommandSettings settings)
+    {
+        var running = ListInstances().Select(view => view.Record)
+            .Where(record => record.Status == RunItemStatus.Running &&
+                record.Lifecycle == RunLifecycle.LongRunning)
+            .GroupBy(record => (record.WorktreePath, record.ProfileId)).ToArray();
+        var targets = running.Select(group =>
+            (group.Key.WorktreePath, Profile: settings.EffectiveProfiles(group.Key.WorktreePath)
+                .FirstOrDefault(value => value.Id == group.Key.ProfileId)
+                ?? throw new InvalidOperationException(
+                    $"{group.First().ProfileName} 프로필이 현재 설정에 없어 재시작할 수 없습니다.")))
+            .ToArray();
+        foreach (var target in targets)
+            await RestartAllAsync(target.WorktreePath, target.Profile);
+    }
+
+    public async Task StopRunningAsync()
+    {
+        var running = ListInstances().Where(view => view.IsRunning).ToArray();
+        await Task.WhenAll(running.Select(view => StopInstanceAsync(view.Record.InstanceId)));
+    }
+
+    public void ClearHistory() => ProcessHistory.Clean(stateRoot, clearAll: true);
+
+    public void PruneHistory() => ProcessHistory.Clean(stateRoot, clearAll: false);
+
     public void ValidateSettingsTransition(RepositoryCommandSettings settings)
     {
+        _ = ListInstances();
         lock (sync)
             foreach (var instance in instances.Values.Where(value => IsActive(value.Record.Status)))
             {
@@ -103,6 +315,7 @@ internal sealed class RunProfileManager
     public IReadOnlyList<string> FindPortConflicts(string worktreePath, RunProfile profile,
         string? targetItemId = null)
     {
+        _ = ListInstances();
         var targets = new HashSet<string>();
         if (targetItemId is not null)
         {
@@ -142,8 +355,12 @@ internal sealed class RunProfileManager
 
     public async Task RestartAllAsync(string worktreePath, RunProfile profile)
     {
-        await StopAllAsync(worktreePath, profile);
-        await RunAllAsync(worktreePath, profile);
+        RunProfileValidator.Validate(profile, worktreePath);
+        var targets = profile.Items.Where(item => item.Enabled &&
+            item.Lifecycle == RunLifecycle.LongRunning &&
+            GetItemState(worktreePath, profile, item).Status == RunItemStatus.Running).ToArray();
+        await Task.WhenAll(targets.Select(item => StopItemAsync(worktreePath, profile, item.Id)));
+        await StartItemsAsync(worktreePath, profile, targets, startDependencies: false);
     }
 
     public async Task StartItemAsync(string worktreePath, RunProfile profile, string itemId)
@@ -161,7 +378,7 @@ internal sealed class RunProfileManager
     }
 
     private async Task StartItemsAsync(string worktreePath, RunProfile profile,
-        IEnumerable<RunItem> targets)
+        IEnumerable<RunItem> targets, bool startDependencies = true)
     {
         var targetIds = targets.Select(item => item.Id).ToHashSet();
         var byId = profile.Items.ToDictionary(item => item.Id);
@@ -169,6 +386,11 @@ internal sealed class RunProfileManager
         Task<bool> Start(RunItem item)
         {
             if (tasks.TryGetValue(item.Id, out var current)) return current;
+            if (!startDependencies && !targetIds.Contains(item.Id))
+            {
+                var existing = GetItemState(worktreePath, profile, item).Status;
+                return Task.FromResult(existing is RunItemStatus.Running or RunItemStatus.Completed);
+            }
             var task = StartCore(item);
             tasks.Add(item.Id, task);
             return task;
@@ -195,8 +417,9 @@ internal sealed class RunProfileManager
         var folder = ItemFolder(worktreePath, profile.Id, item.Id);
         var record = new RunInstanceRecord(Guid.NewGuid().ToString("N"),
             Path.GetFullPath(worktreePath), profile.Id, item.Id, null, DateTime.UtcNow,
-            DateTime.UtcNow, RunItemStatus.Idle, null, "선행 항목이 준비되지 않아 시작하지 않았습니다.");
-        var instance = new Instance { Key = key, JobName = JobName(key), Folder = folder,
+            DateTime.UtcNow, RunItemStatus.Idle, null, "선행 항목이 준비되지 않아 시작하지 않았습니다.")
+            { ProfileName = profile.Name, ItemName = item.Name, Lifecycle = item.Lifecycle };
+        var instance = new Instance { Key = key, JobName = "", Folder = folder,
             Record = record, Item = item, ProfileName = profile.Name };
         lock (sync) instances[key] = instance;
         Save(instance);
@@ -209,45 +432,50 @@ internal sealed class RunProfileManager
         var instanceId = Guid.NewGuid().ToString("N");
         var runFolder = Path.Combine(folder, instanceId);
         Directory.CreateDirectory(runFolder);
+        var cwd = Path.GetFullPath(Path.Combine(worktreePath, item.WorkingDirectory));
+        var jobName = JobName(instanceId);
+        var gateScript = Path.Combine(runFolder, "gate.cmd");
+        var executablePath = Path.Combine(Environment.GetFolderPath(
+            Environment.SpecialFolder.System), "cmd.exe");
         var instance = new Instance
         {
-            Key = key, JobName = JobName(key), Folder = folder, Item = item,
+            Key = key, JobName = jobName, Folder = folder, Item = item,
             ProfileName = profile.Name,
             Record = new(instanceId, Path.GetFullPath(worktreePath), profile.Id, item.Id,
                 null, DateTime.UtcNow, null, RunItemStatus.Starting, null, null)
+            {
+                JobName = jobName, ProfileName = profile.Name, ItemName = item.Name,
+                RepositoryPath = repositoryPath, RepositoryId = Hash(repositoryPath),
+                WorktreeId = Hash(worktreePath),
+                Lifecycle = item.Lifecycle, Command = item.Command, Arguments = item.Arguments,
+                WorkingDirectory = cwd, ExecutablePath = executablePath,
+                CommandLine = WindowsRunProcess.CommandLineFor(gateScript),
+                EnvironmentNames = item.Environment.Select(entry => entry.Name).ToArray(),
+                EncryptedEnvironment = EnvironmentSnapshot.Protect(item.Environment)
+            }
         };
         lock (sync) instances[key] = instance;
         Save(instance);
         try
         {
-            var cwd = Path.GetFullPath(Path.Combine(worktreePath, item.WorkingDirectory));
             var launcher = await WriteLauncherAsync(item, cwd, runFolder);
             var readyFile = Path.Combine(runFolder, "launch.ready");
-            var gateScript = Path.Combine(runFolder, "gate.cmd");
             await File.WriteAllTextAsync(gateScript,
                 "@echo off\r\nset /a attempts=0\r\n:wait\r\n" +
                 $"if exist \"{readyFile}\" goto run\r\n" +
                 "set /a attempts+=1\r\nif %attempts% GEQ 30 exit /b 1\r\n" +
                 "ping -n 2 127.0.0.1 >nul\r\ngoto wait\r\n:run\r\n" +
-                launcher + "\r\nexit /b %errorlevel%\r\n");
-            var start = new ProcessStartInfo("cmd.exe")
-            {
-                WorkingDirectory = cwd, UseShellExecute = false, CreateNoWindow = true,
-                RedirectStandardOutput = true, RedirectStandardError = true
-            };
-            start.ArgumentList.Add("/d");
-            start.ArgumentList.Add("/c");
-            start.ArgumentList.Add(gateScript);
-            foreach (var entry in item.Environment) start.Environment[entry.Name] = entry.Value;
+                launcher + "\r\nset code=%errorlevel%\r\n" +
+                $"echo %code% > \"{Path.Combine(runFolder, "exit.code")}\"\r\n" +
+                "exit /b %code%\r\n");
             var job = WindowsRunJob.Create(instance.JobName);
-            var process = Process.Start(start) ?? throw new InvalidOperationException("프로세스를 시작할 수 없습니다.");
+            var process = WindowsRunProcess.Start(gateScript, cwd, item.Environment,
+                Path.Combine(runFolder, "stdout.log"), Path.Combine(runFolder, "stderr.log"), job);
             instance.Process = process;
-            WindowsRunJob.Assign(job, process);
             if (!WindowsRunJob.IsRunning(instance.JobName))
                 throw new InvalidOperationException("Windows Job Object가 실행 프로세스를 보유하지 못했습니다.");
+            instance.Record = instance.Record with { StartedUtc = process.StartTime.ToUniversalTime() };
             Set(instance, RunItemStatus.WaitingReady, process.Id);
-            instance.StdoutTask = PumpAsync(process.StandardOutput, Path.Combine(runFolder, "stdout.log"));
-            instance.StderrTask = PumpAsync(process.StandardError, Path.Combine(runFolder, "stderr.log"));
             instance.MonitorTask = MonitorAsync(instance);
             await File.WriteAllTextAsync(readyFile, "ready");
             if (item.Lifecycle == RunLifecycle.OneShot)
@@ -265,7 +493,7 @@ internal sealed class RunProfileManager
                     "준비 조건을 만족하지 못했습니다.");
                 return false;
             }
-            if (instance.Process?.HasExited == true)
+            if (!WindowsRunJob.IsRunning(instance.JobName))
             {
                 if (instance.MonitorTask is not null) await instance.MonitorTask;
                 return false;
@@ -307,29 +535,21 @@ internal sealed class RunProfileManager
             : $"call \"{script}\" {item.Arguments}";
     }
 
-    private static async Task PumpAsync(StreamReader reader, string path)
-    {
-        await using var stream = new FileStream(path, FileMode.Create, FileAccess.Write,
-            FileShare.ReadWrite, 4096, useAsync: true);
-        await using var writer = new StreamWriter(stream) { AutoFlush = true };
-        while (await reader.ReadLineAsync() is { } line)
-            await writer.WriteLineAsync(line);
-    }
-
     private async Task MonitorAsync(Instance instance)
     {
         var process = instance.Process!;
         await process.WaitForExitAsync();
-        await Task.WhenAll(instance.StdoutTask, instance.StderrTask);
+        while (WindowsRunJob.IsRunning(instance.JobName)) await Task.Delay(250);
         var status = instance.Record.Status == RunItemStatus.Stopping
             ? RunItemStatus.Stopped
-            : instance.Item.Lifecycle == RunLifecycle.OneShot && process.ExitCode == 0
-                ? RunItemStatus.Completed
-                : process.ExitCode == 0 && instance.Ready
-                    ? RunItemStatus.Stopped : RunItemStatus.Failed;
+            : instance.Item.Lifecycle == RunLifecycle.LongRunning
+                ? RunItemStatus.Exited
+                : process.ExitCode == 0 ? RunItemStatus.Completed : RunItemStatus.Failed;
         Set(instance, status, exitCode: process.ExitCode,
             reason: status == RunItemStatus.Failed
                 ? $"종료 코드 {process.ExitCode}" : instance.Record.Reason);
+        WindowsRunJob.ReleaseIfEmpty(instance.JobName);
+        process.Dispose();
     }
 
     private static async Task<bool> WaitReadyAsync(Instance instance)
@@ -338,7 +558,7 @@ internal sealed class RunProfileManager
         if (item.Readiness.Type == RunReadinessKind.Process)
         {
             await Task.Delay(300);
-            if (instance.Process!.HasExited)
+            if (!WindowsRunJob.IsRunning(instance.JobName))
             {
                 instance.Record = instance.Record with { Reason = "프로세스가 준비 전에 종료되었습니다." };
                 return false;
@@ -349,7 +569,7 @@ internal sealed class RunProfileManager
         var deadline = DateTime.UtcNow.AddSeconds(item.Readiness.TimeoutSeconds);
         while (DateTime.UtcNow < deadline)
         {
-            if (instance.Process!.HasExited)
+            if (!WindowsRunJob.IsRunning(instance.JobName))
             {
                 instance.Record = instance.Record with { Reason = "프로세스가 포트를 열기 전에 종료되었습니다." };
                 return false;
@@ -365,14 +585,44 @@ internal sealed class RunProfileManager
 
     public async Task StopItemAsync(string worktreePath, RunProfile profile, string itemId)
     {
+        var item = profile.Items.FirstOrDefault(value => value.Id == itemId);
+        if (item is null) return;
+        _ = GetItemState(worktreePath, profile, item);
         var key = Key(worktreePath, profile.Id, itemId);
         Instance? instance;
         lock (sync) instances.TryGetValue(key, out instance);
         if (instance is null || !IsActive(instance.Record.Status)) return;
+        await StopInstanceAsync(instance, force: false);
+    }
+
+    private async Task StopInstanceAsync(Instance instance, bool force)
+    {
+        if (!IsActive(instance.Record.Status)) return;
         Set(instance, RunItemStatus.Stopping);
-        WindowsRunJob.Terminate(instance.JobName);
+        if (!force && instance.Record.ProcessId is int rootPid &&
+            WindowsRunJob.ContainsProcess(instance.JobName, rootPid))
+            ConsoleStopSignal.TrySendBreak(rootPid);
+        if (!force)
+            for (var attempt = 0; attempt < 32 && WindowsRunJob.IsRunning(instance.JobName); attempt++)
+                await Task.Delay(250);
+        if (WindowsRunJob.IsRunning(instance.JobName)) WindowsRunJob.Terminate(instance.JobName);
+        for (var attempt = 0; attempt < 32 && WindowsRunJob.IsRunning(instance.JobName); attempt++)
+            await Task.Delay(250);
+        if (WindowsRunJob.IsRunning(instance.JobName))
+            throw new IOException("프로세스 그룹이 종료되지 않았습니다.");
         if (instance.MonitorTask is not null) await instance.MonitorTask;
         else Set(instance, RunItemStatus.Stopped);
+    }
+
+    public Task KillItemAsync(string worktreePath, RunProfile profile, string itemId)
+    {
+        var item = profile.Items.FirstOrDefault(value => value.Id == itemId);
+        if (item is null) return Task.CompletedTask;
+        _ = GetItemState(worktreePath, profile, item);
+        var key = Key(worktreePath, profile.Id, itemId);
+        lock (sync)
+            return instances.TryGetValue(key, out var instance)
+                ? StopInstanceAsync(instance, force: true) : Task.CompletedTask;
     }
 
     public async Task StopAllAsync(string worktreePath, RunProfile profile)
@@ -393,6 +643,17 @@ internal sealed class RunProfileManager
         return reader.ReadToEnd();
     }
 
+    public string ReadInstanceLog(RunInstanceRecord record, bool stderr)
+    {
+        var path = Path.Combine(ItemFolder(record.WorktreePath, record.ProfileId, record.ItemId),
+            record.InstanceId, stderr ? "stderr.log" : "stdout.log");
+        if (!File.Exists(path)) return "로그가 없습니다.";
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        stream.Seek(-Math.Min(24_000, stream.Length), SeekOrigin.End);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
     private void Set(Instance instance, RunItemStatus status, int? pid = null,
         int? exitCode = null, string? reason = null)
     {
@@ -403,7 +664,7 @@ internal sealed class RunProfileManager
                 Status = status, ProcessId = pid ?? instance.Record.ProcessId,
                 ExitCode = exitCode ?? instance.Record.ExitCode,
                 EndedUtc = status is RunItemStatus.Completed or RunItemStatus.Failed or
-                    RunItemStatus.Stopped ? DateTime.UtcNow : null,
+                    RunItemStatus.Stopped or RunItemStatus.Exited ? DateTime.UtcNow : null,
                 Reason = reason
             };
             Save(instance);
@@ -423,6 +684,11 @@ internal sealed class RunProfileManager
     private RunInstanceRecord? ReadLatest(string worktreePath, string profileId, string itemId)
     {
         var path = Path.Combine(ItemFolder(worktreePath, profileId, itemId), "latest.json");
+        return ReadRecord(path);
+    }
+
+    private static RunInstanceRecord? ReadRecord(string path)
+    {
         if (!File.Exists(path)) return null;
         try { return JsonSerializer.Deserialize<RunInstanceRecord>(File.ReadAllText(path)); }
         catch (Exception error) when (error is IOException or JsonException) { return null; }
@@ -434,7 +700,7 @@ internal sealed class RunProfileManager
     private string Key(string worktreePath, string profileId, string itemId) =>
         $"{Hash(repositoryPath)}.{Hash(worktreePath)}.{Hash(profileId)}.{Hash(itemId)}";
 
-    private static string JobName(string key) => $"Local\\Nebb.DevManager.Profile.{key}";
+    private static string JobName(string instanceId) => $"Local\\Nebb.DevManager.Profile.{instanceId}";
     private static string Hash(string value) => Convert.ToHexString(
         SHA256.HashData(Encoding.UTF8.GetBytes(value.ToUpperInvariant())))[..20].ToLowerInvariant();
     private static RunItemState View(RunInstanceRecord record) =>

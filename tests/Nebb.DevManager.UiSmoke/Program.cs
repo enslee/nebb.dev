@@ -1,4 +1,6 @@
 using System.IO;
+using System.Diagnostics;
+using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -7,8 +9,19 @@ using Nebb.DevManager;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        if (args.Length == 1 && args[0].StartsWith("--start-process-ui-fixture=", StringComparison.Ordinal))
+        {
+            var repository = args[0]["--start-process-ui-fixture=".Length..];
+            var profile = new RunProfile { Id = "process-ui-profile", Name = "UI Development", Items =
+                [new RunItem { Id = "process-ui-item", Name = "UI Server",
+                    Kind = RunItemKind.ShellScript,
+                    Script = "Write-Output 'ui-reattach-ready'; Start-Sleep -Seconds 30" }] };
+            new RunProfileManager(repository).RunAllAsync(repository, profile)
+                .GetAwaiter().GetResult();
+            return;
+        }
         var root = Path.Combine(Path.GetTempPath(), "NebbProfileUiSmoke", Guid.NewGuid().ToString("N"));
         var worktree = Path.Combine(root, "branch");
         var storage = Path.Combine(root, "settings");
@@ -100,13 +113,165 @@ internal static class Program
                     throw new Exception("Port conflict details missing");
                 Click(conflictDialog.RunAnywayButton);
             });
-            Console.WriteLine("PASS: WPF profile candidate/editor/snapshot and test/service settings");
+            var manager = new RunProfileManager(root, Path.Combine(root, "profile-runs"));
+            var shutdownEntries = Enumerable.Range(0, 2).Select(index =>
+                new ShutdownEntry("Example", manager, new ProcessInstanceView(
+                    new RunInstanceRecord($"instance-{index}", worktree, "profile", $"item-{index}",
+                        1234 + index, DateTime.UtcNow, null, RunItemStatus.Running, null, null)
+                    { ProfileName = "Development", ItemName = $"Service {index}" }, []))).ToArray();
+            var keep = new ProcessShutdownDialog(shutdownEntries)
+                { ShowActivated = false, ShowInTaskbar = false, Left = -10000, Top = -10000 };
+            RunDialog(keep, () => keep.IsLoaded, () => Click(keep.KeepButton));
+            if (keep.Choice != ShutdownChoice.Keep || keep.SelectedEntries.Count != 0)
+                throw new Exception("Keep-and-close choice failed");
+            var selected = new ProcessShutdownDialog(shutdownEntries)
+                { ShowActivated = false, ShowInTaskbar = false, Left = -10000, Top = -10000 };
+            RunDialog(selected, () => selected.IsLoaded, () =>
+            {
+                selected.RunningList.SelectedIndex = 1;
+                Click(selected.StopSelectedButton);
+            });
+            if (selected.Choice != ShutdownChoice.StopSelected ||
+                selected.SelectedEntries.Single() != shutdownEntries[1])
+                throw new Exception("Selected shutdown choice failed");
+            var all = new ProcessShutdownDialog(shutdownEntries)
+                { ShowActivated = false, ShowInTaskbar = false, Left = -10000, Top = -10000 };
+            RunDialog(all, () => all.IsLoaded, () => Click(all.StopAllButton));
+            if (all.Choice != ShutdownChoice.StopAll || all.SelectedEntries.Count != 2)
+                throw new Exception("Stop-all shutdown choice failed");
+            RunReattachedMainWindow(root);
+            Console.WriteLine("PASS: WPF profile editor, shutdown choices, and reattached process controls");
         }
         finally
         {
             var basePath = Path.Combine(Path.GetTempPath(), "NebbProfileUiSmoke") + Path.DirectorySeparatorChar;
             if (root.StartsWith(basePath, StringComparison.OrdinalIgnoreCase) && Directory.Exists(root))
                 Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void RunReattachedMainWindow(string root)
+    {
+        var repository = Path.Combine(root, "process-ui-repository");
+        Directory.CreateDirectory(repository);
+        using (var git = Process.Start(new ProcessStartInfo("git")
+        {
+            WorkingDirectory = repository, UseShellExecute = false, CreateNoWindow = true,
+            ArgumentList = { "init", "-b", "main" }
+        })!) git.WaitForExit();
+        var profile = new RunProfile { Id = "process-ui-profile", Name = "UI Development", Items =
+            [new RunItem { Id = "process-ui-item", Name = "UI Server",
+                Kind = RunItemKind.ShellScript,
+                Script = "Write-Output 'ui-reattach-ready'; Start-Sleep -Seconds 30" }] };
+        var store = new CommandSettingsStore(repository);
+        var settings = store.Load();
+        settings.DefaultProfiles = [profile];
+        store.Save(settings);
+        var repositoryHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(repository.ToUpperInvariant())))[..20]
+            .ToLowerInvariant();
+        var appData = Path.Combine(Environment.GetFolderPath(
+            Environment.SpecialFolder.LocalApplicationData), "Nebb", "DevManager");
+        var runsPath = Path.Combine(appData, "profile-runs", repositoryHash);
+        var settingsPath = Path.Combine(appData, "command-settings", repositoryHash + ".json");
+        try
+        {
+            var starter = new ProcessStartInfo("dotnet")
+                { UseShellExecute = false, CreateNoWindow = true };
+            starter.ArgumentList.Add(Assembly.GetExecutingAssembly().Location);
+            starter.ArgumentList.Add("--start-process-ui-fixture=" + repository);
+            using (var child = Process.Start(starter)!)
+            {
+                child.WaitForExit();
+                if (child.ExitCode != 0) throw new Exception("UI reattach fixture did not start");
+            }
+            var appAssembly = Assembly.Load("Nebb.DevManager");
+            var catalogType = appAssembly.GetType("Nebb.DevManager.RepositoryCatalog", true)!;
+            var catalog = Activator.CreateInstance(catalogType,
+                [Path.Combine(root, "process-ui-catalog.json")])!;
+            catalogType.GetMethod("Add")!.Invoke(catalog, [repository]);
+            var mainType = appAssembly.GetType("Nebb.DevManager.MainWindow", true)!;
+            var constructor = mainType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic,
+                null, [catalogType, typeof(string)], null)!;
+            var main = (Window)constructor.Invoke([catalog, repository]);
+            main.ShowActivated = false;
+            main.ShowInTaskbar = false;
+            main.WindowStartupLocation = WindowStartupLocation.Manual;
+            main.Left = -10000;
+            main.Top = -10000;
+            var list = (ListView)main.FindName("ProcessList")!;
+            var log = (TextBox)main.FindName("LogText")!;
+            var started = DateTime.UtcNow;
+            var clicked = false;
+            Exception? failure = null;
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            timer.Tick += (_, _) =>
+            {
+                try
+                {
+                    if (DateTime.UtcNow - started > TimeSpan.FromSeconds(18))
+                    {
+                        var current = new RunProfileManager(repository).GetItemState(repository,
+                            profile, profile.Items[0]);
+                        throw new TimeoutException($"WPF process control timed out: {current.Status} {current.Reason}");
+                    }
+                    if (!clicked)
+                    {
+                        if (list.Items.Count == 0) return;
+                        if ((bool)mainType.GetField("busy", BindingFlags.Instance |
+                            BindingFlags.NonPublic)!.GetValue(main)!) return;
+                        var row = list.Items[0];
+                        var display = row.GetType().GetProperty("Display")!.GetValue(row)!.ToString()!;
+                        if (!display.Contains("Running")) return;
+                        var button = new Button { Tag = row };
+                        mainType.GetMethod("ProcessLogs_Click", BindingFlags.Instance |
+                            BindingFlags.NonPublic)!.Invoke(main, [button, new RoutedEventArgs()]);
+                        if (!log.Text.Contains("ui-reattach-ready"))
+                            throw new Exception("WPF process log did not reopen after restart");
+                        mainType.GetMethod("ProcessKill_Click", BindingFlags.Instance |
+                            BindingFlags.NonPublic)!.Invoke(main, [button, new RoutedEventArgs()]);
+                        clicked = true;
+                    }
+                    else
+                    {
+                        var current = new RunProfileManager(repository).GetItemState(repository,
+                            profile, profile.Items[0]);
+                        if (current.Status != RunItemStatus.Stopped) return;
+                        timer.Stop();
+                        mainType.GetField("closeApproved", BindingFlags.Instance |
+                            BindingFlags.NonPublic)!.SetValue(main, true);
+                        main.Close();
+                    }
+                }
+                catch (Exception error)
+                {
+                    failure = error;
+                    timer.Stop();
+                    var record = new RunProfileManager(repository).ListInstances()
+                        .FirstOrDefault()?.Record;
+                    if (record?.JobName is not null)
+                        try { WindowsRunJob.Terminate(record.JobName); } catch { }
+                    mainType.GetField("closeApproved", BindingFlags.Instance |
+                        BindingFlags.NonPublic)!.SetValue(main, true);
+                    main.Close();
+                }
+            };
+            timer.Start();
+            main.ShowDialog();
+            timer.Stop();
+            if (failure is not null) throw failure;
+            if (!clicked) throw new Exception("WPF reattached process was not controlled");
+        }
+        finally
+        {
+            Task.Run(() => new RunProfileManager(repository).StopRunningAsync())
+                .GetAwaiter().GetResult();
+            var runsRoot = Path.GetFullPath(Path.Combine(appData, "profile-runs")) +
+                Path.DirectorySeparatorChar;
+            if (Path.GetFullPath(runsPath).StartsWith(runsRoot,
+                    StringComparison.OrdinalIgnoreCase) && Directory.Exists(runsPath))
+                Directory.Delete(runsPath, recursive: true);
+            if (File.Exists(settingsPath)) File.Delete(settingsPath);
         }
     }
 

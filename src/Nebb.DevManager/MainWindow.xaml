@@ -1,12 +1,13 @@
 <Window x:Class="Nebb.DevManager.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Dev Manager" Width="1540" Height="850" MinWidth="950" MinHeight="650">
+        Title="Dev Manager" Width="1540" Height="950" MinWidth="950" MinHeight="750">
   <Grid Margin="16">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
+      <RowDefinition Height="225" />
       <RowDefinition Height="180" />
     </Grid.RowDefinitions>
 
@@ -87,7 +88,44 @@
       </StackPanel>
     </StackPanel>
 
-    <GroupBox Grid.Row="3" Header="선택한 실행 항목의 로그">
+    <GroupBox Grid.Row="3" Header="Processes" Margin="0,0,0,8">
+      <DockPanel Margin="6">
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,5">
+          <TextBlock x:Name="ProcessCountText" VerticalAlignment="Center" Margin="0,0,12,0" />
+          <ComboBox x:Name="ProcessRepositoryChoice" Width="220" Margin="0,0,8,0"
+                    DisplayMemberPath="DisplayName" SelectionChanged="ProcessRepositoryChoice_SelectionChanged" />
+          <Button x:Name="ProcessStopAllButton" Content="Stop All" Width="82" Margin="0,0,7,0"
+                  Click="ProcessStopAll_Click" />
+          <Button x:Name="ProcessRestartAllButton" Content="Restart All" Width="92" Margin="0,0,7,0"
+                  Click="ProcessRestartAll_Click" />
+          <Button x:Name="ProcessClearHistoryButton" Content="Clear history" Width="100"
+                  Click="ProcessClearHistory_Click" />
+        </StackPanel>
+        <ListView x:Name="ProcessList" ScrollViewer.VerticalScrollBarVisibility="Auto">
+          <ListView.GroupStyle><GroupStyle>
+            <GroupStyle.HeaderTemplate><DataTemplate>
+              <TextBlock Text="{Binding Name}" FontWeight="SemiBold" Margin="4,5,0,2" />
+            </DataTemplate></GroupStyle.HeaderTemplate>
+          </GroupStyle></ListView.GroupStyle>
+          <ListView.ItemTemplate><DataTemplate>
+            <DockPanel Margin="4,1">
+              <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button Content="Logs" Tag="{Binding}" Click="ProcessLogs_Click" Width="52" />
+                <Button Content="Restart" Tag="{Binding}" Click="ProcessRestart_Click"
+                        IsEnabled="{Binding CanRestart}" Width="62" Margin="4,0,0,0" />
+                <Button Content="Stop" Tag="{Binding}" Click="ProcessStop_Click"
+                        IsEnabled="{Binding CanControl}" Width="50" Margin="4,0,0,0" />
+                <Button Content="Kill" Tag="{Binding}" Click="ProcessKill_Click"
+                        IsEnabled="{Binding CanControl}" Width="46" Margin="4,0,0,0" />
+              </StackPanel>
+              <TextBlock Text="{Binding Display}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+            </DockPanel>
+          </DataTemplate></ListView.ItemTemplate>
+        </ListView>
+      </DockPanel>
+    </GroupBox>
+
+    <GroupBox Grid.Row="4" Header="선택한 실행 항목의 로그">
       <TextBox x:Name="LogText" IsReadOnly="True" TextWrapping="NoWrap"
                FontFamily="Consolas" FontSize="12" HorizontalScrollBarVisibility="Auto"
                VerticalScrollBarVisibility="Auto" />
