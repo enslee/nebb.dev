@@ -44,6 +44,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        WindowsRunJob.TerminateAll();
         if (ownsMutex) instanceMutex?.ReleaseMutex();
         instanceMutex?.Dispose();
         base.OnExit(e);

@@ -31,8 +31,8 @@ dotnet run --project src/Nebb.DevManager/Nebb.DevManager.csproj -- --repository 
 `origin/HEAD`가 가리키는 브랜치이며, 설정되지 않았다면 `main` 또는 `master`를
 사용합니다. 원격 작업에는 `origin`이 필요합니다.
 
-**실행/전환**, **종료**, **웹 열기**, **리빌드 후 재시작**은 PixPeek 저장소에서만
-사용할 수 있습니다. 다른 저장소에서는 워크트리를 선택한 뒤 **명령 설정**에서
+PixPeek 저장소의 **실행/전환**, **종료**, **웹 열기**, **리빌드 후 재시작**은 기존 방식으로
+동작합니다. 다른 저장소에서는 워크트리를 선택한 뒤 **명령 설정**에서
 실행·테스트 명령 후보를 확인하고 각각 하나를 선택하거나 직접 추가할 수 있습니다.
 후보를 선택한 뒤 이름, 명령, 인수, 워크트리 기준 상대 작업 폴더, 환경변수를
 수정하세요. 환경변수는 한 줄에 `NAME=value` 형식으로 입력합니다.
@@ -49,7 +49,14 @@ dotnet run --project src/Nebb.DevManager/Nebb.DevManager.csproj -- --repository 
 아닌 `%LOCALAPPDATA%\Nebb\DevManager\command-settings`에 저장됩니다.
 서비스 목록도 저장소 기본값을 상속하며, 워크트리에서 기본 목록을 복사해 서비스를
 추가·제거·수정하거나 서비스 Override를 해제할 수 있습니다.
-이 단계의 명령 설정 화면은 명령을 실행하지 않습니다.
+일반 저장소에서 Run 명령을 저장하면 해당 워크트리의 **실행/전환**이 활성화됩니다.
+이를 누르면 같은 저장소에서 Dev Manager가 시작한 이전 Run 명령을 종료하고 선택한
+워크트리의 Run 명령을 시작합니다. 명령과 인수는 선택한 워크트리의 작업 폴더에서
+지정한 환경변수로 실행됩니다. **종료**는 Dev Manager에서 시작한 명령만 종료하며,
+상태와 최근 로그를 화면에서 확인할 수 있습니다. 실행 기록과 로그는
+`%LOCALAPPDATA%\Nebb\DevManager\command-runs`에 보관합니다. 테스트·서비스 명령은
+계속 설정만 가능하며, 명령 설정 화면에서는 명령을 실행하지 않습니다. 일반 저장소의
+Run 명령은 Dev Manager를 닫을 때 함께 종료됩니다.
 
 PixPeek 서버 실행에는 Node.js/npm과 Chrome이 필요합니다. 기존 PixPeek Dev
 Manager와 같은 단일 실행 잠금 및 `%LOCALAPPDATA%\PixPeek\DevManager`의 실행

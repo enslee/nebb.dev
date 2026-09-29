@@ -22,6 +22,8 @@ public partial class MainWindow : Window
             Repository = repository;
             BaseBranch = GitBranchDefaults.Detect(repository.Path);
             Manager = new DevServerManager(repository.Path);
+            CommandStore = new CommandSettingsStore(repository.Path);
+            RunManager = new CommandRunManager(repository.Path);
             Git = new GitStatusService(repository.Path, BaseBranch);
             GitActions = new GitActionService(repository.Path, BaseBranch);
         }
@@ -29,6 +31,8 @@ public partial class MainWindow : Window
         public RepositoryEntry Repository { get; }
         public string BaseBranch { get; }
         public DevServerManager Manager { get; }
+        public CommandSettingsStore CommandStore { get; }
+        public CommandRunManager RunManager { get; }
         public GitStatusService Git { get; }
         public GitActionService GitActions { get; }
     }
@@ -40,26 +44,34 @@ public partial class MainWindow : Window
         private string? activityStatus;
 
         public WorktreeRow(RepositoryContext context, Worktree worktree,
-            WorktreeState state, GitWorktreeState gitState)
+            WorktreeState state, GitWorktreeState gitState, SavedCommand? runCommand = null,
+            CommandRunState? runState = null)
         {
             Context = context;
             Worktree = worktree;
             State = state;
             GitState = gitState;
+            RunCommand = runCommand;
+            RunState = runState;
         }
 
         public RepositoryContext Context { get; }
         public Worktree Worktree { get; }
         public WorktreeState State { get; }
         public GitWorktreeState GitState { get; }
+        public SavedCommand? RunCommand { get; }
+        public CommandRunState? RunState { get; }
+        public bool HasRunCommand => !string.IsNullOrWhiteSpace(RunCommand?.Command);
         public string RepositoryName => Context.Repository.Name;
         public bool IsPixPeek => Context.Repository.IsPixPeek;
         public string Branch => Worktree.Branch;
         public string Path => Worktree.Path;
-        public string ServerStatus => activityStatus ?? (State.Status == "시작 중" ? "전환 중" : State.Status);
+        public string ServerStatus => activityStatus ?? (IsPixPeek
+            ? State.Status == "시작 중" ? "전환 중" : State.Status
+            : RunState?.Status ?? "중지");
         public Brush IndicatorBrush => activityStatus is not null || State.Status == "시작 중" ? Brushes.DarkOrange :
-            State.HasProcesses ? Brushes.ForestGreen : Brushes.Gray;
-        public string IndicatorText => IsPixPeek ? "●" : "—";
+            State.HasProcesses || RunState?.IsRunning == true ? Brushes.ForestGreen : Brushes.Gray;
+        public string IndicatorText => IsPixPeek || RunState?.IsRunning == true ? "●" : "—";
         public string Commit => GitState.Commit;
         public string CommitTime => GitState.CommitTime;
         public string WorkingTree => GitState.WorkingTree;
@@ -130,12 +142,25 @@ public partial class MainWindow : Window
                 {
                     var worktrees = await context.Manager.ListWorktreesAsync();
                     var gitStates = await context.Git.GetStatesAsync(worktrees);
+                    RepositoryCommandSettings? commandSettings = null;
+                    if (!context.Repository.IsPixPeek)
+                    {
+                        try { commandSettings = context.CommandStore.Load(); }
+                        catch (Exception error)
+                        {
+                            errors.Add($"{context.Repository.Name} 명령 설정: {error.Message}");
+                        }
+                    }
                     for (var index = 0; index < worktrees.Count; index++)
                     {
                         var state = context.Repository.IsPixPeek
                             ? context.Manager.GetState(worktrees[index], snapshot)
                             : new WorktreeState("미설정", null, null, false, false, null);
-                        refreshed.Add(new WorktreeRow(context, worktrees[index], state, gitStates[index]));
+                        var runCommand = commandSettings?.Effective(worktrees[index].Path, CommandKind.Run);
+                        var runState = context.Repository.IsPixPeek ? null :
+                            context.RunManager.GetState(worktrees[index].Path);
+                        refreshed.Add(new WorktreeRow(context, worktrees[index], state,
+                            gitStates[index], runCommand, runState));
                     }
                 }
                 catch (Exception error)
@@ -301,12 +326,13 @@ public partial class MainWindow : Window
     private void LocalModel_Click(object sender, RoutedEventArgs e) =>
         new LocalModelDialog { Owner = this }.ShowDialog();
 
-    private void CommandSettings_Click(object sender, RoutedEventArgs e)
+    private async void CommandSettings_Click(object sender, RoutedEventArgs e)
     {
         if (busy || WorktreeGrid.SelectedItem is not WorktreeRow row) return;
         try
         {
-            new CommandSettingsDialog(row.Context.Repository.Path, row.Path) { Owner = this }.ShowDialog();
+            if (new CommandSettingsDialog(row.Context.Repository.Path, row.Path)
+                { Owner = this }.ShowDialog() == true) await RefreshAsync();
         }
         catch (Exception error)
         {
@@ -317,6 +343,11 @@ public partial class MainWindow : Window
 
     private async Task StartRowAsync(WorktreeRow row)
     {
+        if (!row.IsPixPeek)
+        {
+            await RunCommandActionAsync(row, start: true);
+            return;
+        }
         if (!await RunActionAsync(row, row.Context.Manager.StartAsync, activityStatus: "전환 중")) return;
         try { OpenPwa(); }
         catch (Exception error)
@@ -326,8 +357,36 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task StopRowAsync(WorktreeRow row) =>
-        await RunActionAsync(row, (worktree, _) => row.Context.Manager.StopAsync(worktree));
+    private async Task StopRowAsync(WorktreeRow row)
+    {
+        if (!row.IsPixPeek) await RunCommandActionAsync(row, start: false);
+        else await RunActionAsync(row, (worktree, _) => row.Context.Manager.StopAsync(worktree));
+    }
+
+    private async Task RunCommandActionAsync(WorktreeRow row, bool start)
+    {
+        if (busy || row.IsPixPeek || start && !row.HasRunCommand) return;
+        busy = true;
+        row.SetActivity(start ? "전환 중" : "종료 중");
+        ToggleButtons(false);
+        UpdateSelection();
+        try
+        {
+            if (start) await row.Context.RunManager.SwitchAsync(row.Path, row.RunCommand!);
+            else await row.Context.RunManager.StopAsync(row.Path);
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, error.Message, start ? "명령 실행 실패" : "명령 종료 실패",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            busy = false;
+            await RefreshAsync();
+            row.SetActivity(null);
+        }
+    }
 
     private async Task RestartRowAsync(WorktreeRow row) =>
         await RunActionAsync(row, row.Context.Manager.RebuildAndRestartAsync, activityStatus: "재시작 중");
@@ -402,9 +461,10 @@ public partial class MainWindow : Window
     private void WorktreeContextMenu_Opened(object sender, RoutedEventArgs e)
     {
         if (sender is not ContextMenu menu || menu.DataContext is not WorktreeRow row) return;
-        ((MenuItem)menu.Items[0]).IsEnabled = !busy && row.IsPixPeek;
+        ((MenuItem)menu.Items[0]).IsEnabled = !busy && (row.IsPixPeek || row.HasRunCommand);
         ((MenuItem)menu.Items[1]).IsEnabled = !busy && CanRestart(row);
-        ((MenuItem)menu.Items[2]).IsEnabled = !busy && row.IsPixPeek && row.State.HasProcesses;
+        ((MenuItem)menu.Items[2]).IsEnabled = !busy && (row.IsPixPeek
+            ? row.State.HasProcesses : row.RunState?.IsRunning == true);
         ((MenuItem)menu.Items[3]).IsEnabled = !busy && CanOpen(row);
         ((MenuItem)menu.Items[5]).IsEnabled = !busy && CanCommit(row);
         ((MenuItem)menu.Items[6]).IsEnabled = !busy && CanMerge(row);
@@ -590,12 +650,17 @@ public partial class MainWindow : Window
         }
         else
         {
-            DetailsText.Text = $"{row.Context.Repository.Name} · {row.Path}\n이 저장소의 서버 실행 설정은 다음 단계에서 제공됩니다.\n{row.GitState.Details}";
-            LogText.Text = "이 저장소에는 서버 실행 설정이 없습니다.";
+            var command = row.RunCommand;
+            var summary = row.HasRunCommand
+                ? $"{row.RunState?.Status ?? "중지"} · {command!.Name}: {command.Command} {command.Arguments} · {command.WorkingDirectory}"
+                : "실행 명령이 없습니다. 명령 설정에서 Run 명령을 저장하세요.";
+            DetailsText.Text = $"{row.Context.Repository.Name} · {row.Path}\n{summary}\n실행/전환은 같은 저장소에서 Dev Manager가 실행한 이전 명령을 종료하고 선택한 워크트리의 Run 명령을 시작합니다.\n{row.GitState.Details}";
+            LogText.Text = row.Context.RunManager.ReadRecentLog(row.Path);
         }
         if (repositoryError is not null) DetailsText.Text += $"\n저장소 확인 실패: {repositoryError}";
-        StartButton.IsEnabled = !busy && row.IsPixPeek;
-        StopButton.IsEnabled = !busy && row.IsPixPeek && row.State.HasProcesses;
+        StartButton.IsEnabled = !busy && (row.IsPixPeek || row.HasRunCommand);
+        StopButton.IsEnabled = !busy && (row.IsPixPeek
+            ? row.State.HasProcesses : row.RunState?.IsRunning == true);
         OpenButton.IsEnabled = !busy && CanOpen(row);
     }
 

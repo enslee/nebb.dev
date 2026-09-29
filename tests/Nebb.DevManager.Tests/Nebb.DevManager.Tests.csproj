@@ -9,5 +9,7 @@
     <Compile Include="../../src/Nebb.DevManager/CommandSettings.cs" Link="CommandSettings.cs" />
     <Compile Include="../../src/Nebb.DevManager/CommandDiscovery.cs" Link="CommandDiscovery.cs" />
     <Compile Include="../../src/Nebb.DevManager/CommandDetectionRules.cs" Link="CommandDetectionRules.cs" />
+    <Compile Include="../../src/Nebb.DevManager/CommandRunManager.cs" Link="CommandRunManager.cs" />
+    <Compile Include="../../src/Nebb.DevManager/WindowsRunJob.cs" Link="WindowsRunJob.cs" />
   </ItemGroup>
 </Project>

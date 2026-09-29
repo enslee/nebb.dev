@@ -1,4 +1,5 @@
 using Nebb.DevManager;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 
 if (args.Length == 2 && args[0] == "--scan")
@@ -10,6 +11,19 @@ if (args.Length == 2 && args[0] == "--scan")
             $"Test={group.Count(item => item.Kind == CommandKind.Test)}, " +
             $"Service={group.Count(item => item.Kind == CommandKind.Service)}");
     Console.WriteLine($"Total: {actual.Count}");
+    return;
+}
+
+if (args.Length == 3 && args[0] == "--start-run-fixture")
+{
+    var worktreePath = args[1];
+    var command = new SavedCommand
+    {
+        Name = "Restart fixture", Command = Path.Combine(worktreePath, "apps", "desktop", "long-run.cmd"),
+        WorkingDirectory = "apps/desktop"
+    };
+    await new CommandRunManager(Path.GetDirectoryName(worktreePath)!, args[2])
+        .SwitchAsync(worktreePath, command);
     return;
 }
 
@@ -152,7 +166,112 @@ try
     Expect(compatible.DefaultServices.Count == 0 && compatible.ServiceOverrides.Count == 0 &&
         compatible.Default.Run?.Command == "npm", "Existing settings compatibility");
 
-    Console.WriteLine($"PASS: {candidates.Count} candidates, 11 stacks, persistence and inheritance");
+    if (OperatingSystem.IsWindows())
+    {
+        var runOne = Path.Combine(root, "run-one");
+        var runTwo = Path.Combine(root, "run-two");
+        var runFolders = new[] { runOne, runTwo }.Select(path => Path.Combine(path, "apps", "desktop")).ToArray();
+        foreach (var folder in runFolders)
+        {
+            Directory.CreateDirectory(folder);
+            File.WriteAllText(Path.Combine(folder, "long-run.cmd"),
+                "@echo off\r\necho %RUN_MARKER%:%CD%\r\npowershell.exe -NoProfile -Command \"Start-Sleep -Seconds 30\"\r\n");
+        }
+        var npmAvailable = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator)
+            .Any(folder => File.Exists(Path.Combine(folder, "npm.cmd"))) == true;
+        if (npmAvailable) File.WriteAllText(Path.Combine(runFolders[1], "package.json"),
+            """{"scripts":{"dev":"node -e \"console.log('npm-dev-ready');setInterval(()=>{},1000)\""}}""");
+        var runManager = new CommandRunManager(root, Path.Combine(root, "run-state"));
+        SavedCommand RunFor(string folder, string marker) => new()
+        {
+            Name = "Desktop", Command = Path.Combine(folder, "long-run.cmd"),
+            WorkingDirectory = "apps/desktop",
+            Environment = [new EnvironmentEntry("RUN_MARKER", marker)]
+        };
+        var secondCommand = npmAvailable ? new SavedCommand
+        {
+            Name = "Desktop npm", Command = "npm", Arguments = "run dev",
+            WorkingDirectory = "apps/desktop"
+        } : RunFor(runFolders[1], "two");
+        var runStore = new CommandSettingsStore(root, Path.Combine(root, "run-settings"));
+        var runSettings = runStore.Load();
+        runSettings.Default.Run = RunFor(runFolders[0], "one");
+        runSettings.OverrideFor(runTwo).Run = secondCommand;
+        runStore.Save(runSettings);
+        var persistedRuns = runStore.Load();
+        var runThree = Path.Combine(root, "run-three");
+        try
+        {
+            await runManager.SwitchAsync(runOne, persistedRuns.Effective(runOne, CommandKind.Run)!);
+            Expect(runManager.GetState(runOne).IsRunning, "Run command did not stay active");
+            var restartedManager = new CommandRunManager(root, Path.Combine(root, "run-state"));
+            Expect(restartedManager.GetState(runOne).IsRunning, "Run state was not restored");
+            for (var attempt = 0; attempt < 20 && !runManager.ReadRecentLog(runOne).Contains("one:"); attempt++)
+                await Task.Delay(100);
+            Expect(runManager.ReadRecentLog(runOne).Contains($"one:{runFolders[0]}",
+                StringComparison.OrdinalIgnoreCase), "Working directory, environment, or log was not applied");
+
+            try { await runManager.SwitchAsync(runTwo, new SavedCommand
+                { Name = "Invalid", Command = "cmd.exe", WorkingDirectory = "missing" }); }
+            catch (ArgumentException) { /* Keep the current command after validation fails. */ }
+            Expect(runManager.GetState(runOne).IsRunning, "Invalid run stopped the previous worktree");
+
+            try { await runManager.SwitchAsync(runTwo, persistedRuns.Effective(runTwo, CommandKind.Run)!); }
+            catch (Exception error)
+            {
+                throw new Exception($"Run failed: {error.Message} Log: {runManager.ReadRecentLog(runTwo)}", error);
+            }
+            Expect(!runManager.GetState(runOne).IsRunning && runManager.GetState(runTwo).IsRunning,
+                "Switch did not stop the previous worktree");
+            Expect(WindowsRunJob.IsRunning(CommandRunManager.JobName(runTwo)),
+                "Job disappeared after start");
+            if (npmAvailable)
+            {
+                for (var attempt = 0; attempt < 50 &&
+                    !runManager.ReadRecentLog(runTwo).Contains("npm-dev-ready"); attempt++)
+                    await Task.Delay(100);
+                Expect(runManager.ReadRecentLog(runTwo).Contains("npm-dev-ready"),
+                    $"npm run dev did not execute through the command runner: {runManager.ReadRecentLog(runTwo)}");
+                Expect(WindowsRunJob.IsRunning(CommandRunManager.JobName(runTwo)), "Job disappeared after npm spawned");
+            }
+            await restartedManager.StopAsync(runTwo);
+            Expect(!runManager.GetState(runTwo).IsRunning, "Stop did not terminate the run command");
+
+            var thirdFolder = Path.Combine(runThree, "apps", "desktop");
+            Directory.CreateDirectory(thirdFolder);
+            File.WriteAllText(Path.Combine(thirdFolder, "long-run.cmd"),
+                "@echo off\r\npowershell.exe -NoProfile -Command \"Start-Sleep -Seconds 60\"\r\n");
+            var childStart = new ProcessStartInfo("dotnet")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            childStart.ArgumentList.Add(typeof(CommandRunManager).Assembly.Location);
+            childStart.ArgumentList.Add("--start-run-fixture");
+            childStart.ArgumentList.Add(runThree);
+            childStart.ArgumentList.Add(Path.Combine(root, "run-state"));
+            using (var child = Process.Start(childStart)!)
+            {
+                await child.WaitForExitAsync();
+                Expect(child.ExitCode == 0, "Fixture start process failed");
+            }
+            Expect(!runManager.GetState(runThree).IsRunning,
+                "Run from previous process survived Dev Manager exit");
+
+            var quick = new SavedCommand
+                { Name = "Quick", Command = "cmd.exe", Arguments = "/d /c exit 0", WorkingDirectory = "apps/desktop" };
+            await runManager.SwitchAsync(runTwo, quick);
+            Expect(!runManager.GetState(runTwo).IsRunning, "Completed command is still marked running");
+            await runManager.SwitchAsync(runTwo, quick);
+        }
+        finally
+        {
+            foreach (var worktreePath in new[] { runOne, runTwo, runThree })
+                if (runManager.GetState(worktreePath).IsRunning) await runManager.StopAsync(worktreePath);
+        }
+    }
+
+    Console.WriteLine($"PASS: {candidates.Count} candidates, 11 stacks, persistence, run/switch/stop/exit");
 }
 finally
 {

@@ -13,7 +13,7 @@
     <DockPanel Grid.Row="0" Margin="0,0,0,12" LastChildFill="False">
       <StackPanel DockPanel.Dock="Left">
         <TextBlock Text="개발 저장소" FontSize="22" FontWeight="SemiBold" />
-        <TextBlock Text="워크트리와 Git 상태 · PixPeek 서버 제어 · 원격 상태는 마지막 가져오기 기준" Foreground="#65758B" />
+        <TextBlock Text="워크트리와 Git 상태 · 저장한 실행 명령 제어 · 원격 상태는 마지막 가져오기 기준" Foreground="#65758B" />
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
         <TextBlock Text="표시" VerticalAlignment="Center" Margin="0,0,8,0" />
@@ -67,7 +67,7 @@
       </StackPanel>
     </StackPanel>
 
-    <GroupBox Grid.Row="3" Header="선택한 워크트리의 서버 로그 (PixPeek)">
+    <GroupBox Grid.Row="3" Header="선택한 워크트리의 실행 로그">
       <TextBox x:Name="LogText" IsReadOnly="True" TextWrapping="NoWrap"
                FontFamily="Consolas" FontSize="12" HorizontalScrollBarVisibility="Auto"
                VerticalScrollBarVisibility="Auto" />
