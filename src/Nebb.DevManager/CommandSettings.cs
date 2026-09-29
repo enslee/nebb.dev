@@ -8,13 +8,17 @@ namespace Nebb.DevManager;
 
 internal enum CommandKind { Run, Test, Service }
 internal enum CandidateConfidence { Low, Medium, High }
+internal enum CandidatePriority { Normal, Recommended }
 
 internal sealed record CommandCandidate(
     string Id, string Name, string Command, string Arguments, string WorkingDirectory,
     CommandKind Kind, string Stack, string SourceFile, string RuleId,
-    CandidateConfidence Confidence)
+    CandidateConfidence Confidence, CandidatePriority Priority = CandidatePriority.Normal,
+    string? SupportingEvidence = null)
 {
-    public string Display => $"{Name}  ·  {Command} {Arguments}  ·  {WorkingDirectory}  ·  {SourceFile}  ·  {RuleId}  ·  {Confidence}";
+    public string SourceDescription => SupportingEvidence is null
+        ? SourceFile : $"{SourceFile} + {SupportingEvidence}";
+    public string Display => $"{Name}  ·  {Command} {Arguments}  ·  {WorkingDirectory}  ·  {SourceDescription}  ·  {RuleId}  ·  {Confidence}";
     public string ProjectGroup => CandidateGrouping.ProjectPath(WorkingDirectory);
 }
 

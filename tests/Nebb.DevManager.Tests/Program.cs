@@ -43,6 +43,16 @@ try
     }
 
     Put("frontend/package.json", """{"scripts":{"dev":"vite","test":"vitest"}}""");
+    Put("apps/desktop/package.json", """{"scripts":{"dev":"vite","tauri":"tauri"},"devDependencies":{"@tauri-apps/cli":"2.0.0"}}""");
+    Put("apps/desktop/src-tauri/tauri.conf.json", "{}");
+    Put("tauri-cli/package.json", """{"packageManager":"pnpm@10.0.0","scripts":{"tauri":"tauri"},"dependencies":{"@tauri-apps/cli":"2.0.0"}}""");
+    Put("tauri-config-only/package.json", """{"scripts":{"tauri":"tauri"}}""");
+    Put("tauri-config-only/src-tauri/tauri.conf.json", "{}");
+    Put("tauri-cargo/package.json", """{"scripts":{"tauri":"tauri"}}""");
+    Put("tauri-cargo/src-tauri/Cargo.toml", "[dependencies]\ntauri = { version = '2' }\n");
+    Put("tauri-no-evidence/package.json", """{"scripts":{"dev":"vite","tauri":"tauri"}}""");
+    Put("tauri-no-script/package.json", """{"scripts":{"dev":"vite"}}""");
+    Put("tauri-no-script/src-tauri/tauri.conf.json", "{}");
     Put("node_modules/ignored/package.json", """{"scripts":{"dev":"ignored"}}""");
     Put(".claude/worktrees/copied/package.json", """{"scripts":{"dev":"copied"}}""");
     Put("nested-worktree/.git", "gitdir: ../.git/worktrees/nested-worktree");
@@ -79,6 +89,43 @@ try
         Expect(candidates.Any(item => item.Stack == stack), $"Missing stack: {stack}");
     Expect(candidates.Any(item => item.Stack == "Node" && item.Kind == CommandKind.Run), "Node run missing");
     Expect(candidates.Any(item => item.Stack == "Node" && item.Kind == CommandKind.Test), "Node test missing");
+    var tauri = candidates.Single(item => item.RuleId == "node.tauri-app" &&
+        item.WorkingDirectory == "apps/desktop");
+    Expect(tauri.Name == "Tauri App" && tauri.Command == "npm" &&
+        tauri.Arguments == "run tauri dev" && tauri.Priority == CandidatePriority.Recommended &&
+        tauri.Confidence == CandidateConfidence.High &&
+        tauri.SourceDescription.Contains("apps/desktop/package.json + apps/desktop/src-tauri/tauri.conf.json"),
+        "Tauri app candidate or evidence missing");
+    Expect(candidates.Any(item => item.RuleId == "node.package-script" &&
+        item.WorkingDirectory == "apps/desktop" && item.Name == "Frontend Only" &&
+        item.Arguments == "run dev" && item.Priority == CandidatePriority.Normal),
+        "Frontend-only Vite candidate lost");
+    Expect(candidates.Count(item => item.RuleId == "node.tauri-app") == 4 &&
+        candidates.Any(item => item.WorkingDirectory == "tauri-cli" &&
+            item.Command == "pnpm" && item.SupportingEvidence == "@tauri-apps/cli (package.json)") &&
+        candidates.Any(item => item.WorkingDirectory == "tauri-config-only" &&
+            item.SupportingEvidence == "tauri-config-only/src-tauri/tauri.conf.json") &&
+        candidates.Any(item => item.WorkingDirectory == "tauri-cargo" &&
+            item.SupportingEvidence == "tauri-cargo/src-tauri/Cargo.toml"),
+        "Tauri dependency, config, and Cargo evidence detection");
+    Expect(!candidates.Any(item => item.RuleId == "node.tauri-app" &&
+        item.WorkingDirectory.StartsWith("tauri-no-", StringComparison.OrdinalIgnoreCase)),
+        "Tauri candidate without both a script and project evidence");
+    Expect(candidates.Any(item => item.WorkingDirectory == "tauri-no-evidence" &&
+        item.Name == "dev"), "Unconfirmed Tauri project was relabeled");
+    File.Delete(Path.Combine(root, "apps", "desktop", "src-tauri", "tauri.conf.json"));
+    var fallback = discovery.Discover(root);
+    Expect(fallback.Any(item => item.Id == tauri.Id &&
+        item.SupportingEvidence == "@tauri-apps/cli (package.json)"),
+        "Tauri candidate ID changed with supporting evidence");
+    Put("apps/desktop/src-tauri/tauri.conf.json", "{}");
+    var configOnly = candidates.Single(item => item.RuleId == "node.tauri-app" &&
+        item.WorkingDirectory == "tauri-config-only");
+    var savedTauri = SavedCommand.FromCandidate(configOnly);
+    savedTauri.Arguments = "custom dev arguments";
+    File.Delete(Path.Combine(root, "tauri-config-only", "src-tauri", "tauri.conf.json"));
+    Expect(CommandDiscovery.SourceMissing(savedTauri, discovery.Discover(root), CommandKind.Run) &&
+        savedTauri.Arguments == "custom dev arguments", "Missing Tauri source changed saved command");
     Expect(candidates.Any(item => item.Stack == "Go" && item.Kind == CommandKind.Run), "Go run missing");
     Expect(candidates.Any(item => item.Stack == "Go" && item.Kind == CommandKind.Test), "Go test missing");
     Expect(candidates.Count(item => item.Stack == "Compose" && item.Kind == CommandKind.Service) == 2,
@@ -103,6 +150,7 @@ try
     {
         var group = candidates.Where(item => item.Kind == kind).ToArray();
         Expect(group.SequenceEqual(group.OrderByDescending(item => item.Confidence)
+            .ThenByDescending(item => item.Priority)
             .ThenBy(item => item.WorkingDirectory, StringComparer.OrdinalIgnoreCase)
             .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase)), "Candidate order");
     }

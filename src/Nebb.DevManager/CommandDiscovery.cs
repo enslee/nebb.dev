@@ -95,13 +95,26 @@ internal static class CandidateRules
         return null;
     }
 
+    public static string NodePackageManager(RepositoryScan scan, ProjectUnit project, JsonElement package)
+    {
+        if (package.TryGetProperty("packageManager", out var declared) &&
+            declared.ValueKind == JsonValueKind.String)
+            return declared.GetString()!.Split('@')[0];
+        if (scan.Has(Path.Combine(project.Root, "pnpm-lock.yaml"))) return "pnpm";
+        if (scan.Has(Path.Combine(project.Root, "yarn.lock"))) return "yarn";
+        if (scan.Has(Path.Combine(project.Root, "bun.lock")) ||
+            scan.Has(Path.Combine(project.Root, "bun.lockb"))) return "bun";
+        return "npm";
+    }
+
     public static CommandCandidate Make(ProjectUnit project, string rule, string key,
         string name, string command, string arguments, CommandKind kind,
         CandidateConfidence confidence, string? workingDirectory = null,
-        string? sourceFile = null) => new(
+        string? sourceFile = null, CandidatePriority priority = CandidatePriority.Normal,
+        string? supportingEvidence = null) => new(
         $"{project.Stack}|{sourceFile ?? project.Manifest}|{rule}|{key}", name, command,
         arguments, workingDirectory ?? project.Root, kind, project.Stack,
-        sourceFile ?? project.Manifest, rule, confidence);
+        sourceFile ?? project.Manifest, rule, confidence, priority, supportingEvidence);
 
     public static JsonDocument? Json(RepositoryScan scan, string path)
     {
@@ -153,7 +166,8 @@ internal sealed class CommandDiscovery
 {
     private readonly ICommandDetector[] detectors =
     [
-        new ManifestDetector("Node", name => name.Equals("package.json", StringComparison.OrdinalIgnoreCase), new NodeScriptRule()),
+        new ManifestDetector("Node", name => name.Equals("package.json", StringComparison.OrdinalIgnoreCase),
+            new NodeScriptRule(), new TauriRule()),
         new ManifestDetector(".NET", name => name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
             name.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase), new DotNetProjectRule()),
         new ManifestDetector("Python", name => name.Equals("pyproject.toml", StringComparison.OrdinalIgnoreCase) ||
@@ -188,6 +202,7 @@ internal sealed class CommandDiscovery
                 StringComparer.OrdinalIgnoreCase)
             .Select(group => group.OrderByDescending(item => item.Confidence).ThenBy(item => item.Id).First())
             .OrderBy(item => item.Kind).ThenByDescending(item => item.Confidence)
+            .ThenByDescending(item => item.Priority)
             .ThenBy(item => item.WorkingDirectory, StringComparer.OrdinalIgnoreCase)
             .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToArray();
     }

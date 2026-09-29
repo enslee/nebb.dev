@@ -13,21 +13,78 @@ internal sealed class NodeScriptRule : IDetectionRule
         using var json = CandidateRules.Json(scan, project.Manifest);
         if (json is null || !json.RootElement.TryGetProperty("scripts", out var scripts) ||
             scripts.ValueKind != JsonValueKind.Object) yield break;
-        var manager = "npm";
-        if (json.RootElement.TryGetProperty("packageManager", out var packageManager) &&
-            packageManager.ValueKind == JsonValueKind.String)
-            manager = packageManager.GetString()!.Split('@')[0];
-        else if (scan.Has(Path.Combine(project.Root, "pnpm-lock.yaml"))) manager = "pnpm";
-        else if (scan.Has(Path.Combine(project.Root, "yarn.lock"))) manager = "yarn";
-        else if (scan.Has(Path.Combine(project.Root, "bun.lock")) ||
-                 scan.Has(Path.Combine(project.Root, "bun.lockb"))) manager = "bun";
+        var manager = CandidateRules.NodePackageManager(scan, project, json.RootElement);
+        var tauriApp = TauriRule.SupportingEvidence(scan, project, json.RootElement) is not null;
         foreach (var script in scripts.EnumerateObject())
         {
             var kind = CandidateRules.KindFor(script.Name);
             if (kind is null || script.Value.ValueKind != JsonValueKind.String) continue;
-            yield return CandidateRules.Make(project, Id, script.Name, script.Name,
+            var name = tauriApp && script.Name.Equals("dev", StringComparison.OrdinalIgnoreCase) &&
+                Regex.IsMatch(script.Value.GetString()!, @"^\s*vite(?:\s|$)", RegexOptions.IgnoreCase)
+                ? "Frontend Only" : script.Name;
+            yield return CandidateRules.Make(project, Id, script.Name, name,
                 manager, $"run {script.Name}", kind.Value, CandidateConfidence.High);
         }
+    }
+}
+
+internal sealed class TauriRule : IDetectionRule
+{
+    public string Id => "node.tauri-app";
+
+    public IEnumerable<CommandCandidate> Evaluate(RepositoryScan scan, ProjectUnit project)
+    {
+        using var json = CandidateRules.Json(scan, project.Manifest);
+        if (json is null) yield break;
+        var evidence = SupportingEvidence(scan, project, json.RootElement);
+        if (evidence is null) yield break;
+        yield return CandidateRules.Make(project, Id, "tauri.dev", "Tauri App",
+            CandidateRules.NodePackageManager(scan, project, json.RootElement),
+            "run tauri dev", CommandKind.Run, CandidateConfidence.High,
+            priority: CandidatePriority.Recommended, supportingEvidence: evidence);
+    }
+
+    internal static string? SupportingEvidence(RepositoryScan scan, ProjectUnit project, JsonElement package)
+    {
+        if (!package.TryGetProperty("scripts", out var scripts) ||
+            scripts.ValueKind != JsonValueKind.Object ||
+            !scripts.TryGetProperty("tauri", out var script) ||
+            script.ValueKind != JsonValueKind.String ||
+            !script.GetString()!.Trim().Equals("tauri", StringComparison.OrdinalIgnoreCase)) return null;
+
+        var config = Path.Combine(project.Root, "src-tauri", "tauri.conf.json");
+        if (scan.Has(config)) return RepositoryScan.Normalize(config);
+
+        var cargo = Path.Combine(project.Root, "src-tauri", "Cargo.toml");
+        if (scan.Has(cargo) && HasCargoDependency(scan.Read(cargo)))
+            return RepositoryScan.Normalize(cargo);
+
+        foreach (var section in new[] { "dependencies", "devDependencies", "optionalDependencies" })
+            if (package.TryGetProperty(section, out var dependencies) &&
+                dependencies.ValueKind == JsonValueKind.Object &&
+                dependencies.TryGetProperty("@tauri-apps/cli", out _))
+                return "@tauri-apps/cli (package.json)";
+        return null;
+    }
+
+    private static bool HasCargoDependency(string content)
+    {
+        var section = "";
+        foreach (var raw in content.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith('[') && line.EndsWith(']'))
+            {
+                section = line.Trim('[', ']');
+                if (section.Equals("dependencies.tauri", StringComparison.OrdinalIgnoreCase) ||
+                    section.EndsWith(".dependencies.tauri", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            else if ((section.Equals("dependencies", StringComparison.OrdinalIgnoreCase) ||
+                      section.EndsWith(".dependencies", StringComparison.OrdinalIgnoreCase)) &&
+                     Regex.IsMatch(line, @"^tauri\s*=")) return true;
+        }
+        return false;
     }
 }
 

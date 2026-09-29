@@ -21,7 +21,9 @@ File.WriteAllText(Path.Combine(worktree, "server", "docker-compose.yml"),
     "services:\n  db:\n    image: postgres\n  minio:\n    image: minio\n");
 Directory.CreateDirectory(Path.Combine(root, "apps", "desktop"));
 File.WriteAllText(Path.Combine(root, "apps", "desktop", "package.json"),
-    """{"scripts":{"dev":"vite"}}""");
+    """{"scripts":{"dev":"vite","tauri":"tauri"},"devDependencies":{"@tauri-apps/cli":"2.0.0"}}""");
+Directory.CreateDirectory(Path.Combine(root, "apps", "desktop", "src-tauri"));
+File.WriteAllText(Path.Combine(root, "apps", "desktop", "src-tauri", "tauri.conf.json"), "{}");
 Directory.CreateDirectory(Path.Combine(root, "server"));
 File.WriteAllText(Path.Combine(root, "server", "docker-compose.yml"),
     "services:\n  db:\n    image: postgres\n  minio:\n    image: minio\n");
@@ -29,6 +31,25 @@ File.WriteAllText(Path.Combine(root, "server", "docker-compose.yml"),
 try
 {
     var store = new CommandSettingsStore(root, storage);
+    RunDialog(root, root, storage, dialog =>
+    {
+        var desktop = dialog.CandidateTree.Items.OfType<TreeViewItem>()
+            .First(item => item.Header.ToString()!.Contains("apps/desktop"));
+        var sections = desktop.Items.OfType<TreeViewItem>().ToArray();
+        if (sections.Length != 2 || sections[0].Header.ToString() != "Recommended" ||
+            sections[1].Header.ToString() != "Other" ||
+            sections[0].Items.OfType<TreeViewItem>().Single().Tag is not CommandCandidate
+                { Name: "Tauri App", Priority: CandidatePriority.Recommended } ||
+            sections[1].Items.OfType<TreeViewItem>().Single().Tag is not CommandCandidate
+                { Name: "Frontend Only", Arguments: "run dev" })
+            throw new Exception("Tauri and frontend candidates were not grouped by meaning");
+        SelectCandidate(dialog, item => item.Name == "Tauri App");
+        Click(dialog.ChooseCandidateButton);
+        if (dialog.CommandBox.Text != "npm" || dialog.ArgumentsBox.Text != "run tauri dev" ||
+            dialog.WorkingDirectoryBox.Text != "apps/desktop")
+            throw new Exception("Tauri candidate selection did not populate the editor");
+        dialog.Close();
+    });
     RunDialog(root, root, storage, dialog =>
     {
         SelectCandidate(dialog, item => item.SourceFile == "package.json" && item.Kind == CommandKind.Run);

@@ -154,8 +154,15 @@ public partial class CommandSettingsDialog : Window
                 Header = CandidateGrouping.Title(group.Key),
                 IsExpanded = true
             };
-            foreach (var candidate in group.Where(item => item.Kind == CommandKind.Run))
-                projectItem.Items.Add(CandidateItem(candidate));
+            var runs = group.Where(item => item.Kind == CommandKind.Run).ToArray();
+            if (runs.Any(item => item.Priority == CandidatePriority.Recommended))
+            {
+                AddSubgroup(projectItem, "Recommended",
+                    runs.Where(item => item.Priority == CandidatePriority.Recommended));
+                AddSubgroup(projectItem, "Other",
+                    runs.Where(item => item.Priority == CandidatePriority.Normal));
+            }
+            else foreach (var candidate in runs) projectItem.Items.Add(CandidateItem(candidate));
             AddSubgroup(projectItem, "Tests", group.Where(item => item.Kind == CommandKind.Test));
             AddSubgroup(projectItem, "Services", group.Where(item => item.Kind == CommandKind.Service));
             CandidateTree.Items.Add(projectItem);
@@ -168,7 +175,7 @@ public partial class CommandSettingsDialog : Window
     private static TreeViewItem CandidateItem(CommandCandidate candidate) => new()
     {
         Header = $"{candidate.Name}  ·  {candidate.Command} {candidate.Arguments}",
-        ToolTip = $"작업 폴더: {candidate.WorkingDirectory}\n출처: {candidate.SourceFile}\n규칙: {candidate.RuleId}\n신뢰도: {candidate.Confidence}",
+        ToolTip = $"작업 폴더: {candidate.WorkingDirectory}\n출처: {candidate.SourceDescription}\n규칙: {candidate.RuleId}\n신뢰도: {candidate.Confidence}",
         Tag = candidate
     };
 
