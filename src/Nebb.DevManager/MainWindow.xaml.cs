@@ -7,6 +7,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using Microsoft.Win32;
 
 namespace Nebb.DevManager;
 
@@ -14,26 +15,51 @@ public partial class MainWindow : Window
 {
     private enum GitAction { Commit, Merge, Push }
 
+    private sealed class RepositoryContext
+    {
+        public RepositoryContext(RepositoryEntry repository)
+        {
+            Repository = repository;
+            BaseBranch = GitBranchDefaults.Detect(repository.Path);
+            Manager = new DevServerManager(repository.Path);
+            Git = new GitStatusService(repository.Path, BaseBranch);
+            GitActions = new GitActionService(repository.Path, BaseBranch);
+        }
+
+        public RepositoryEntry Repository { get; }
+        public string BaseBranch { get; }
+        public DevServerManager Manager { get; }
+        public GitStatusService Git { get; }
+        public GitActionService GitActions { get; }
+    }
+
+    private sealed record FilterChoice(string DisplayName, string? RepositoryPath);
+
     private sealed class WorktreeRow : INotifyPropertyChanged
     {
         private string? activityStatus;
 
-        public WorktreeRow(Worktree worktree, WorktreeState state, GitWorktreeState gitState)
+        public WorktreeRow(RepositoryContext context, Worktree worktree,
+            WorktreeState state, GitWorktreeState gitState)
         {
+            Context = context;
             Worktree = worktree;
             State = state;
             GitState = gitState;
         }
 
+        public RepositoryContext Context { get; }
         public Worktree Worktree { get; }
         public WorktreeState State { get; }
         public GitWorktreeState GitState { get; }
+        public string RepositoryName => Context.Repository.Name;
+        public bool IsPixPeek => Context.Repository.IsPixPeek;
         public string Branch => Worktree.Branch;
         public string Path => Worktree.Path;
         public string ServerStatus => activityStatus ?? (State.Status == "시작 중" ? "전환 중" : State.Status);
         public Brush IndicatorBrush => activityStatus is not null || State.Status == "시작 중" ? Brushes.DarkOrange :
             State.HasProcesses ? Brushes.ForestGreen : Brushes.Gray;
-        public string IndicatorText => "●";
+        public string IndicatorText => IsPixPeek ? "●" : "—";
         public string Commit => GitState.Commit;
         public string CommitTime => GitState.CommitTime;
         public string WorkingTree => GitState.WorkingTree;
@@ -53,21 +79,24 @@ public partial class MainWindow : Window
         }
     }
 
-    private readonly DevServerManager manager;
-    private readonly GitStatusService git;
-    private readonly GitActionService gitActions;
+    private readonly RepositoryCatalog catalog;
+    private readonly List<RepositoryContext> contexts;
+    private readonly List<WorktreeRow> allRows = [];
     private readonly ObservableCollection<WorktreeRow> rows = [];
+    private readonly ObservableCollection<FilterChoice> filters = [];
     private readonly DispatcherTimer refreshTimer = new() { Interval = TimeSpan.FromSeconds(8) };
+    private string? repositoryError;
+    private bool filterUpdating;
     private bool busy;
 
-    public MainWindow(string repositoryPath)
+    internal MainWindow(RepositoryCatalog catalog, string? selectedRepository = null)
     {
+        this.catalog = catalog;
+        contexts = catalog.Repositories.Select(repository => new RepositoryContext(repository)).ToList();
         InitializeComponent();
-        manager = new DevServerManager(repositoryPath);
-        git = new GitStatusService(manager.RepositoryPath);
-        gitActions = new GitActionService(manager.RepositoryPath);
         WorktreeGrid.ItemsSource = rows;
-        Title += $" — {manager.RepositoryPath}";
+        RepositoryFilter.ItemsSource = filters;
+        RebuildFilter(selectedRepository);
         refreshTimer.Tick += async (_, _) => await RefreshAsync();
         Loaded += async (_, _) =>
         {
@@ -82,27 +111,46 @@ public partial class MainWindow : Window
     {
         if (busy) return;
         busy = true;
+        ToggleButtons(false);
         try
         {
             var selectedPath = (WorktreeGrid.SelectedItem as WorktreeRow)?.Path;
-            var worktrees = await manager.ListWorktreesAsync();
-            var snapshotTask = manager.InspectAsync();
-            var gitTask = git.GetStatesAsync(worktrees);
-            await Task.WhenAll(snapshotTask, gitTask);
-            var snapshot = await snapshotTask;
-            var gitStates = await gitTask;
-            rows.Clear();
-            for (var index = 0; index < worktrees.Count; index++)
-                rows.Add(new WorktreeRow(worktrees[index], manager.GetState(worktrees[index], snapshot),
-                    gitStates[index]));
-            WorktreeGrid.SelectedItem = rows.FirstOrDefault(row =>
-                row.Path.Equals(selectedPath, StringComparison.OrdinalIgnoreCase))
-                ?? rows.FirstOrDefault();
-            UpdateSelection();
+            var pixPeek = contexts.FirstOrDefault(context => context.Repository.IsPixPeek);
+            var snapshot = ProcessSnapshot.Empty;
+            var refreshed = new List<WorktreeRow>();
+            var errors = new List<string>();
+            if (pixPeek is not null)
+            {
+                try { snapshot = await pixPeek.Manager.InspectAsync(); }
+                catch (Exception error) { errors.Add($"PixPeek 서버 상태: {error.Message}"); }
+            }
+            foreach (var context in contexts)
+            {
+                try
+                {
+                    var worktrees = await context.Manager.ListWorktreesAsync();
+                    var gitStates = await context.Git.GetStatesAsync(worktrees);
+                    for (var index = 0; index < worktrees.Count; index++)
+                    {
+                        var state = context.Repository.IsPixPeek
+                            ? context.Manager.GetState(worktrees[index], snapshot)
+                            : new WorktreeState("미설정", null, null, false, false, null);
+                        refreshed.Add(new WorktreeRow(context, worktrees[index], state, gitStates[index]));
+                    }
+                }
+                catch (Exception error)
+                {
+                    errors.Add($"{context.Repository.Name}: {error.Message}");
+                }
+            }
+            allRows.Clear();
+            allRows.AddRange(refreshed);
+            repositoryError = errors.Count == 0 ? null : string.Join("\n", errors);
+            ApplyFilter(selectedPath);
         }
         catch (Exception error)
         {
-            DetailsText.Text = $"상태 확인 실패: {error.Message}";
+            repositoryError = $"상태 확인 실패: {error.Message}";
         }
         finally
         {
@@ -111,10 +159,37 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RebuildFilter(string? selectedRepository)
+    {
+        filterUpdating = true;
+        filters.Clear();
+        filters.Add(new FilterChoice("모든 저장소", null));
+        foreach (var repository in catalog.Repositories)
+            filters.Add(new FilterChoice(repository.DisplayName, repository.Path));
+        RepositoryFilter.SelectedItem = filters.FirstOrDefault(item =>
+            item.RepositoryPath is not null &&
+            item.RepositoryPath.Equals(selectedRepository, StringComparison.OrdinalIgnoreCase)) ?? filters[0];
+        filterUpdating = false;
+        ApplyFilter();
+    }
+
+    private void ApplyFilter(string? selectedWorktree = null)
+    {
+        var repositoryPath = (RepositoryFilter.SelectedItem as FilterChoice)?.RepositoryPath;
+        rows.Clear();
+        foreach (var row in allRows.Where(row => repositoryPath is null ||
+                     row.Context.Repository.Path.Equals(repositoryPath, StringComparison.OrdinalIgnoreCase)))
+            rows.Add(row);
+        WorktreeGrid.SelectedItem = rows.FirstOrDefault(row =>
+            row.Path.Equals(selectedWorktree, StringComparison.OrdinalIgnoreCase)) ?? rows.FirstOrDefault();
+        UpdateSelection();
+    }
+
     private async Task<bool> RunActionAsync(WorktreeRow selected,
         Func<Worktree, ProcessSnapshot, Task> action, string? activityStatus = null)
     {
-        if (busy) return false;
+        if (busy || !selected.IsPixPeek) return false;
+        var manager = selected.Context.Manager;
         busy = true;
         selected.SetActivity(activityStatus);
         ToggleButtons(false);
@@ -151,6 +226,32 @@ public partial class MainWindow : Window
 
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await RefreshAsync();
 
+    private void RepositoryFilter_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!filterUpdating) ApplyFilter();
+    }
+
+    private async void AddRepository_Click(object sender, RoutedEventArgs e)
+    {
+        if (busy) return;
+        var picker = new OpenFolderDialog { Title = "추가할 Git 저장소 폴더 선택" };
+        if (picker.ShowDialog(this) != true) return;
+        try
+        {
+            var repository = catalog.Add(picker.FolderName);
+            if (!contexts.Any(context => context.Repository.Path.Equals(
+                    repository.Path, StringComparison.OrdinalIgnoreCase)))
+                contexts.Add(new RepositoryContext(repository));
+            RebuildFilter(repository.Path);
+            await RefreshAsync();
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, error.Message, "저장소 추가 실패",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private async void Fetch_Click(object sender, RoutedEventArgs e)
     {
         if (busy) return;
@@ -158,12 +259,22 @@ public partial class MainWindow : Window
         ToggleButtons(false);
         try
         {
-            await git.FetchOriginAsync();
+            var selectedRepository = (RepositoryFilter.SelectedItem as FilterChoice)?.RepositoryPath;
+            var errors = new List<string>();
+            foreach (var context in contexts.Where(context => selectedRepository is null ||
+                         context.Repository.Path.Equals(selectedRepository, StringComparison.OrdinalIgnoreCase)))
+            {
+                try { await context.Git.FetchOriginAsync(); }
+                catch (Exception error) { errors.Add($"{context.Repository.Name}: {error.Message}"); }
+            }
+            if (errors.Count > 0)
+                MessageBox.Show(this, string.Join("\n", errors), "원격 갱신 실패",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
         }
         catch (Exception error)
         {
             MessageBox.Show(this, $"원격 Git 정보를 갱신하지 못했습니다: {error.Message}",
-                "PixPeek Dev Manager", MessageBoxButton.OK, MessageBoxImage.Error);
+                "Dev Manager", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -189,7 +300,7 @@ public partial class MainWindow : Window
 
     private async Task StartRowAsync(WorktreeRow row)
     {
-        if (!await RunActionAsync(row, manager.StartAsync, activityStatus: "전환 중")) return;
+        if (!await RunActionAsync(row, row.Context.Manager.StartAsync, activityStatus: "전환 중")) return;
         try { OpenPwa(); }
         catch (Exception error)
         {
@@ -199,14 +310,14 @@ public partial class MainWindow : Window
     }
 
     private async Task StopRowAsync(WorktreeRow row) =>
-        await RunActionAsync(row, (worktree, _) => manager.StopAsync(worktree));
+        await RunActionAsync(row, (worktree, _) => row.Context.Manager.StopAsync(worktree));
 
     private async Task RestartRowAsync(WorktreeRow row) =>
-        await RunActionAsync(row, manager.RebuildAndRestartAsync, activityStatus: "재시작 중");
+        await RunActionAsync(row, row.Context.Manager.RebuildAndRestartAsync, activityStatus: "재시작 중");
 
     private void OpenRow(WorktreeRow row)
     {
-        if (busy || row.State.WebPort is not int port) return;
+        if (busy || !row.IsPixPeek || row.State.WebPort is not int port) return;
         if (row.State.Managed && port == DevServerManager.PwaPort) OpenPwa();
         else Process.Start(new ProcessStartInfo($"http://127.0.0.1:{port}") { UseShellExecute = true });
     }
@@ -274,9 +385,9 @@ public partial class MainWindow : Window
     private void WorktreeContextMenu_Opened(object sender, RoutedEventArgs e)
     {
         if (sender is not ContextMenu menu || menu.DataContext is not WorktreeRow row) return;
-        ((MenuItem)menu.Items[0]).IsEnabled = !busy;
+        ((MenuItem)menu.Items[0]).IsEnabled = !busy && row.IsPixPeek;
         ((MenuItem)menu.Items[1]).IsEnabled = !busy && CanRestart(row);
-        ((MenuItem)menu.Items[2]).IsEnabled = !busy && row.State.HasProcesses;
+        ((MenuItem)menu.Items[2]).IsEnabled = !busy && row.IsPixPeek && row.State.HasProcesses;
         ((MenuItem)menu.Items[3]).IsEnabled = !busy && CanOpen(row);
         ((MenuItem)menu.Items[5]).IsEnabled = !busy && CanCommit(row);
         ((MenuItem)menu.Items[6]).IsEnabled = !busy && CanMerge(row);
@@ -324,19 +435,23 @@ public partial class MainWindow : Window
     private async Task RunGitActionAsync(WorktreeRow row, GitAction action)
     {
         if (busy) return;
+        var manager = row.Context.Manager;
+        var gitActions = row.Context.GitActions;
+        var baseBranch = row.Context.BaseBranch;
         busy = true;
         ToggleButtons(false);
         DetailsText.Text = $"{row.Branch} Git 작업 준비 중...";
         var committed = false;
         try
         {
-            Worktree? mainWorktree = null;
+            Worktree? baseWorktree = null;
             if (action == GitAction.Merge)
             {
-                mainWorktree = (await manager.ListWorktreesAsync())
-                    .FirstOrDefault(item => item.Branch == "main") ??
-                    throw new InvalidOperationException("main 워크트리가 없습니다. 원래 저장소를 main으로 전환하세요.");
-                await gitActions.EnsureMergeReadyAsync(row.Worktree, mainWorktree);
+                baseWorktree = (await manager.ListWorktreesAsync())
+                    .FirstOrDefault(item => item.Branch == baseBranch) ??
+                    throw new InvalidOperationException(
+                        $"{baseBranch} 워크트리가 없습니다. 기본 저장소를 {baseBranch}로 전환하세요.");
+                await gitActions.EnsureMergeReadyAsync(row.Worktree, baseWorktree);
             }
 
             var changes = await gitActions.GetPendingChangesAsync(row.Worktree);
@@ -345,15 +460,15 @@ public partial class MainWindow : Window
 
             if (changes.Length != 0)
             {
-                if (row.Branch == "main")
-                    throw new InvalidOperationException("main에서 직접 커밋할 수 없습니다.");
+                if (row.Branch == baseBranch)
+                    throw new InvalidOperationException($"{baseBranch}에서 직접 커밋할 수 없습니다.");
                 var actionName = action switch
                 {
                     GitAction.Merge => "병합",
                     GitAction.Push => "푸시",
                     _ => "커밋"
                 };
-                var dialog = new GitCommitDialog(row.Branch, actionName, changes) { Owner = this };
+                var dialog = new GitCommitDialog(row.Branch, baseBranch, actionName, changes) { Owner = this };
                 if (dialog.ShowDialog() != true) return;
                 await gitActions.CommitAsync(row.Worktree, changes, dialog.CommitMessage);
                 committed = true;
@@ -361,7 +476,7 @@ public partial class MainWindow : Window
             else if (action != GitAction.Commit)
             {
                 var prompt = action == GitAction.Merge
-                    ? $"{row.Branch}를 main에 병합하고 작업 브랜치와 main을 origin에 푸시합니다. 계속할까요?"
+                    ? $"{row.Branch}를 {baseBranch}에 병합하고 작업 브랜치와 {baseBranch}를 origin에 푸시합니다. 계속할까요?"
                     : $"{row.Branch}를 origin에 푸시합니다. 계속할까요?";
                 if (MessageBox.Show(this, prompt, "Git 작업 확인", MessageBoxButton.YesNo,
                         MessageBoxImage.Question) != MessageBoxResult.Yes) return;
@@ -380,9 +495,9 @@ public partial class MainWindow : Window
                         "Git 푸시", MessageBoxButton.OK, MessageBoxImage.Information);
                     break;
                 case GitAction.Merge:
-                    DetailsText.Text = $"{row.Branch}를 main에 병합하고 푸시 중...";
-                    await gitActions.MergeIntoMainAsync(row.Worktree, mainWorktree!);
-                    MessageBox.Show(this, $"{row.Branch}를 main에 병합하고 origin/main에 푸시했습니다.",
+                    DetailsText.Text = $"{row.Branch}를 {baseBranch}에 병합하고 푸시 중...";
+                    await gitActions.MergeIntoBaseAsync(row.Worktree, baseWorktree!);
+                    MessageBox.Show(this, $"{row.Branch}를 {baseBranch}에 병합하고 origin/{baseBranch}에 푸시했습니다.",
                         "Git 병합", MessageBoxButton.OK, MessageBoxImage.Information);
                     break;
             }
@@ -402,50 +517,67 @@ public partial class MainWindow : Window
     }
 
     private static bool CanOpen(WorktreeRow row) =>
-        row.State.WebPort is not null && row.State.Status is ("실행 중" or "외부 실행");
+        row.IsPixPeek && row.State.WebPort is not null &&
+        row.State.Status is ("실행 중" or "외부 실행");
 
     private static bool CanRestart(WorktreeRow row) =>
-        row.State.Status is "실행 중" or "외부 실행";
+        row.IsPixPeek && row.State.Status is "실행 중" or "외부 실행";
 
     private static bool HasWorkBranch(WorktreeRow row) =>
-        row.GitState.Error is null && row.Branch is not ("main" or "(detached)" or "(unknown)");
+        row.GitState.Error is null && row.Branch != row.Context.BaseBranch &&
+        row.Branch is not ("(detached)" or "(unknown)");
 
     private static bool CanCommit(WorktreeRow row) =>
         HasWorkBranch(row) && row.GitState.ChangedFiles > 0;
 
     private static bool CanMerge(WorktreeRow row) =>
-        HasWorkBranch(row) &&
+        HasWorkBranch(row) && row.GitState.MainMerge != MainMergeState.Unavailable &&
         (row.GitState.ChangedFiles > 0 || row.GitState.MainMerge == MainMergeState.Unmerged);
 
     private static bool CanPush(WorktreeRow row) =>
         row.GitState.Error is null && row.Branch is not ("(detached)" or "(unknown)") &&
-        (row.Branch != "main" || row.GitState.ChangedFiles == 0);
+        (row.Branch != row.Context.BaseBranch || row.GitState.ChangedFiles == 0);
 
     private void WorktreeGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
         UpdateSelection();
 
     private void UpdateSelection()
     {
+        AddRepositoryButton.IsEnabled = !busy;
+        RepositoryFilter.IsEnabled = !busy;
+        FetchButton.IsEnabled = !busy && contexts.Count > 0;
         if (WorktreeGrid.SelectedItem is not WorktreeRow row)
         {
-            DetailsText.Text = "워크트리를 선택하세요.";
+            DetailsText.Text = contexts.Count == 0
+                ? "상단의 저장소 추가로 로컬 Git 저장소를 등록하세요."
+                : repositoryError ?? "워크트리를 선택하세요.";
             LogText.Text = "";
-            ToggleButtons(false);
+            StartButton.IsEnabled = false;
+            StopButton.IsEnabled = false;
+            OpenButton.IsEnabled = false;
             return;
         }
 
-        var origin = row.ServerStatus == "재시작 중" ? "선택한 워크트리를 리빌드하고 재시작 중" :
-            row.ServerStatus == "전환 중" ? "선택한 워크트리로 전환 중" :
-            row.State.Managed ? "Dev Manager에서 실행 중" :
-            row.State.HasProcesses ? "다른 터미널에서 실행 중" : "중지";
-        DetailsText.Text = $"{row.Path}\n{origin} · 실행/전환을 누르면 기존 PixPeek 서버를 종료하고 선택한 워크트리의 Full 개발 PWA를 실행합니다.\n{row.GitState.Details}";
-        LogText.Text = row.State.HasProcesses && !row.State.Managed
-            ? "다른 터미널에서 시작한 서버의 로그는 여기서 수집하지 않습니다."
-            : manager.ReadRecentLog(row.Worktree);
-        StartButton.IsEnabled = !busy;
-        StopButton.IsEnabled = !busy && row.State.HasProcesses;
+        if (row.IsPixPeek)
+        {
+            var origin = row.ServerStatus == "재시작 중" ? "선택한 워크트리를 리빌드하고 재시작 중" :
+                row.ServerStatus == "전환 중" ? "선택한 워크트리로 전환 중" :
+                row.State.Managed ? "Dev Manager에서 실행 중" :
+                row.State.HasProcesses ? "다른 터미널에서 실행 중" : "중지";
+            DetailsText.Text = $"{row.Context.Repository.Name} · {row.Path}\n{origin} · 실행/전환을 누르면 기존 PixPeek 서버를 종료하고 선택한 워크트리의 Full 개발 PWA를 실행합니다.\n{row.GitState.Details}";
+            LogText.Text = row.State.HasProcesses && !row.State.Managed
+                ? "다른 터미널에서 시작한 서버의 로그는 여기서 수집하지 않습니다."
+                : row.Context.Manager.ReadRecentLog(row.Worktree);
+        }
+        else
+        {
+            DetailsText.Text = $"{row.Context.Repository.Name} · {row.Path}\n이 저장소의 서버 실행 설정은 다음 단계에서 제공됩니다.\n{row.GitState.Details}";
+            LogText.Text = "이 저장소에는 서버 실행 설정이 없습니다.";
+        }
+        if (repositoryError is not null) DetailsText.Text += $"\n저장소 확인 실패: {repositoryError}";
+        StartButton.IsEnabled = !busy && row.IsPixPeek;
+        StopButton.IsEnabled = !busy && row.IsPixPeek && row.State.HasProcesses;
         OpenButton.IsEnabled = !busy && CanOpen(row);
-        FetchButton.IsEnabled = !busy;
     }
 
     private void ToggleButtons(bool enabled)
@@ -454,5 +586,7 @@ public partial class MainWindow : Window
         StopButton.IsEnabled = enabled;
         OpenButton.IsEnabled = enabled;
         FetchButton.IsEnabled = enabled;
+        AddRepositoryButton.IsEnabled = enabled;
+        RepositoryFilter.IsEnabled = enabled;
     }
 }

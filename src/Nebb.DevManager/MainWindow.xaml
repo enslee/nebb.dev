@@ -1,7 +1,7 @@
 <Window x:Class="Nebb.DevManager.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="PixPeek Dev Manager" Width="1540" Height="720" MinWidth="850" MinHeight="500">
+        Title="Dev Manager" Width="1540" Height="720" MinWidth="950" MinHeight="500">
   <Grid Margin="16">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
@@ -12,10 +12,15 @@
 
     <DockPanel Grid.Row="0" Margin="0,0,0,12" LastChildFill="False">
       <StackPanel DockPanel.Dock="Left">
-        <TextBlock Text="PixPeek 개발 서버" FontSize="22" FontWeight="SemiBold" />
-        <TextBlock Text="선택한 워크트리를 Full 개발 PWA로 실행 · 원격 상태는 마지막 가져오기 기준" Foreground="#65758B" />
+        <TextBlock Text="개발 저장소" FontSize="22" FontWeight="SemiBold" />
+        <TextBlock Text="워크트리와 Git 상태 · PixPeek 서버 제어 · 원격 상태는 마지막 가져오기 기준" Foreground="#65758B" />
       </StackPanel>
-      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+      <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+        <TextBlock Text="표시" VerticalAlignment="Center" Margin="0,0,8,0" />
+        <ComboBox x:Name="RepositoryFilter" Width="270" Margin="0,0,8,0"
+                  DisplayMemberPath="DisplayName" SelectionChanged="RepositoryFilter_SelectionChanged" />
+        <Button x:Name="AddRepositoryButton" Content="저장소 추가" Width="100" Margin="0,0,8,0"
+                Click="AddRepository_Click" />
         <Button Content="새로고침" Width="92" Margin="0,0,8,0" Click="Refresh_Click" />
         <Button x:Name="FetchButton" Content="원격 갱신" Width="92" Click="Fetch_Click" />
       </StackPanel>
@@ -35,13 +40,14 @@
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
+        <DataGridTextColumn Header="저장소" Binding="{Binding RepositoryName}" Width="160" />
         <DataGridTextColumn Header="브랜치" Binding="{Binding Branch}" Width="210" />
         <DataGridTextColumn Header="서버" Binding="{Binding ServerStatus}" Width="105" />
         <DataGridTextColumn Header="커밋" Binding="{Binding Commit}" Width="90" />
         <DataGridTextColumn Header="커밋 시각" Binding="{Binding CommitTime}" Width="145" />
         <DataGridTextColumn Header="작업 변경" Binding="{Binding WorkingTree}" Width="95" />
         <DataGridTextColumn Header="원격" Binding="{Binding PushStatus}" Width="135" />
-        <DataGridTextColumn Header="main 병합" Binding="{Binding MainMergeStatus}" Width="115" />
+        <DataGridTextColumn Header="기본 병합" Binding="{Binding MainMergeStatus}" Width="115" />
         <DataGridTextColumn Header="웹 주소" Binding="{Binding WebAddress}" Width="145" />
         <DataGridTextColumn Header="API" Binding="{Binding ApiAddress}" Width="145" />
         <DataGridTextColumn Header="워크트리" Binding="{Binding Path}" Width="*" />
@@ -57,7 +63,7 @@
       </StackPanel>
     </StackPanel>
 
-    <GroupBox Grid.Row="3" Header="선택한 서버의 최근 로그">
+    <GroupBox Grid.Row="3" Header="선택한 워크트리의 서버 로그 (PixPeek)">
       <TextBox x:Name="LogText" IsReadOnly="True" TextWrapping="NoWrap"
                FontFamily="Consolas" FontSize="12" HorizontalScrollBarVisibility="Auto"
                VerticalScrollBarVisibility="Auto" />

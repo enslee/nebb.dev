@@ -2,7 +2,7 @@ using System.Diagnostics;
 
 namespace Nebb.DevManager;
 
-internal sealed class GitActionService(string repositoryPath)
+internal sealed class GitActionService(string repositoryPath, string baseBranch)
 {
     private sealed record GitResult(int ExitCode, string Output, string Error)
     {
@@ -37,20 +37,24 @@ internal sealed class GitActionService(string repositoryPath)
         await PushBranchAsync(worktree);
     }
 
-    public async Task EnsureMergeReadyAsync(Worktree worktree, Worktree mainWorktree)
+    public async Task EnsureMergeReadyAsync(Worktree worktree, Worktree baseWorktree)
     {
         ValidateWorkBranch(worktree);
-        if (mainWorktree.Branch != "main")
-            throw new InvalidOperationException("main 워크트리를 찾을 수 없습니다.");
+        if (baseWorktree.Branch != baseBranch)
+            throw new InvalidOperationException($"{baseBranch} 워크트리를 찾을 수 없습니다.");
         await EnsureCheckedOutAsync(worktree);
-        await EnsureMainReadyAsync(mainWorktree);
+        await EnsureBaseReadyAsync(baseWorktree);
+        await RunRequiredAsync(repositoryPath, "fetch", "--prune", "origin");
+        var remoteBase = await RunAsync(repositoryPath, "show-ref", "--verify", "--quiet",
+            $"refs/remotes/origin/{baseBranch}");
+        if (remoteBase.ExitCode != 0)
+            throw new InvalidOperationException($"origin/{baseBranch} 브랜치를 찾을 수 없습니다.");
     }
 
-    public async Task MergeIntoMainAsync(Worktree worktree, Worktree mainWorktree)
+    public async Task MergeIntoBaseAsync(Worktree worktree, Worktree baseWorktree)
     {
-        await EnsureMergeReadyAsync(worktree, mainWorktree);
+        await EnsureMergeReadyAsync(worktree, baseWorktree);
         await EnsureCleanAsync(worktree);
-        await RunRequiredAsync(repositoryPath, "fetch", "--prune", "origin");
 
         var remoteBranch = $"refs/remotes/origin/{worktree.Branch}";
         var remoteExists = await RunAsync(worktree.Path, "show-ref", "--verify", "--quiet", remoteBranch);
@@ -59,29 +63,30 @@ internal sealed class GitActionService(string repositoryPath)
         if (remoteExists.ExitCode != 0 && remoteExists.ExitCode != 1)
             throw new InvalidOperationException(remoteExists.Message);
 
-        await MergeIntoBranchAsync(worktree, "refs/remotes/origin/main");
-        await MergeIntoBranchAsync(worktree, "refs/heads/main");
-        await EnsureMainReadyAsync(mainWorktree);
+        await MergeIntoBranchAsync(worktree, $"refs/remotes/origin/{baseBranch}");
+        await MergeIntoBranchAsync(worktree, $"refs/heads/{baseBranch}");
+        await EnsureBaseReadyAsync(baseWorktree);
 
         await PushBranchAsync(worktree);
-        await EnsureMainReadyAsync(mainWorktree);
+        await EnsureBaseReadyAsync(baseWorktree);
         try
         {
-            await RunRequiredAsync(mainWorktree.Path, "merge", "--ff-only", worktree.Branch);
+            await RunRequiredAsync(baseWorktree.Path, "merge", "--ff-only", worktree.Branch);
         }
         catch (Exception error)
         {
             throw new InvalidOperationException(
-                $"작업 브랜치는 푸시됐지만 로컬 main 병합에 실패했습니다. {error.Message}", error);
+                $"작업 브랜치는 푸시됐지만 로컬 {baseBranch} 병합에 실패했습니다. {error.Message}", error);
         }
         try
         {
-            await RunRequiredAsync(mainWorktree.Path, "push", "origin", "main:refs/heads/main");
+            await RunRequiredAsync(baseWorktree.Path, "push", "origin",
+                $"{baseBranch}:refs/heads/{baseBranch}");
         }
         catch (Exception error)
         {
             throw new InvalidOperationException(
-                $"로컬 main 병합은 완료됐지만 origin/main 푸시에 실패했습니다. {error.Message}", error);
+                $"로컬 {baseBranch} 병합은 완료됐지만 origin/{baseBranch} 푸시에 실패했습니다. {error.Message}", error);
         }
     }
 
@@ -116,10 +121,10 @@ internal sealed class GitActionService(string repositoryPath)
             $"HEAD:refs/heads/{branch}");
     }
 
-    private static async Task EnsureMainReadyAsync(Worktree mainWorktree)
+    private static async Task EnsureBaseReadyAsync(Worktree baseWorktree)
     {
-        await EnsureCheckedOutAsync(mainWorktree);
-        await EnsureCleanAsync(mainWorktree);
+        await EnsureCheckedOutAsync(baseWorktree);
+        await EnsureCleanAsync(baseWorktree);
     }
 
     private static async Task EnsureCheckedOutAsync(Worktree worktree)
@@ -143,11 +148,11 @@ internal sealed class GitActionService(string repositoryPath)
             throw new InvalidOperationException("브랜치가 연결되지 않은 워크트리에서는 Git 메뉴를 사용할 수 없습니다.");
     }
 
-    private static void ValidateWorkBranch(Worktree worktree)
+    private void ValidateWorkBranch(Worktree worktree)
     {
         ValidateBranch(worktree);
-        if (worktree.Branch == "main")
-            throw new InvalidOperationException("main에서 직접 커밋하거나 main을 병합할 수 없습니다.");
+        if (worktree.Branch == baseBranch)
+            throw new InvalidOperationException($"{baseBranch}에서 직접 커밋하거나 병합할 수 없습니다.");
     }
 
     private static async Task<GitResult> RunRequiredAsync(string directory, params string[] arguments)

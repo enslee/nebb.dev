@@ -6,6 +6,7 @@ namespace Nebb.DevManager;
 internal enum MainMergeState { Baseline, Same, Merged, Unmerged, Unavailable }
 
 internal sealed record GitWorktreeState(
+    string BaseBranch,
     string Commit, string Subject, DateTimeOffset? CommittedAt,
     int ChangedFiles, int Staged, int Unstaged, int Untracked,
     string? Upstream, string? RemoteBranch, int? Ahead, int? Behind,
@@ -26,7 +27,7 @@ internal sealed record GitWorktreeState(
     public string MainMergeStatus => Error is not null ? "확인 실패" : MainMerge switch
     {
         MainMergeState.Baseline => "기준",
-        MainMergeState.Same => "main과 동일",
+        MainMergeState.Same => $"{BaseBranch}와 동일",
         MainMergeState.Merged => "병합됨",
         MainMergeState.Unmerged => "미병합",
         _ => "확인 불가"
@@ -37,15 +38,15 @@ internal sealed record GitWorktreeState(
         $"커밋 시각: {CommittedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm zzz") ?? "—"}\n" +
         $"작업 변경: {WorkingTree} (스테이징 {Staged}, 미스테이징 {Unstaged}, 미추적 {Untracked})\n" +
         $"원격: {RemoteBranch ?? "없음"} · {PushStatus}\n" +
-        $"main 병합: {MainMergeStatus} (origin/main의 커밋 기준)" +
+        $"{BaseBranch} 병합: {MainMergeStatus} (origin/{BaseBranch}의 커밋 기준)" +
         (Upstream is not null && Upstream != RemoteBranch ? $" · 추적 설정 {Upstream}" : "");
 
-    public static GitWorktreeState Failed(string message) =>
-        new("—", "", null, 0, 0, 0, 0, null, null, null, null,
+    public static GitWorktreeState Failed(string baseBranch, string message) =>
+        new(baseBranch, "—", "", null, 0, 0, 0, 0, null, null, null, null,
             MainMergeState.Unavailable, message);
 }
 
-internal sealed class GitStatusService(string repositoryPath)
+internal sealed class GitStatusService(string repositoryPath, string baseBranch)
 {
     public async Task<GitWorktreeState[]> GetStatesAsync(IReadOnlyList<Worktree> worktrees)
     {
@@ -55,18 +56,19 @@ internal sealed class GitStatusService(string repositoryPath)
                 "refs/remotes/origin");
             var remoteRefs = refs.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .ToHashSet(StringComparer.Ordinal);
-            return await Task.WhenAll(worktrees.Select(item => GetStateAsync(item, remoteRefs)));
+            return await Task.WhenAll(worktrees.Select(item => GetStateAsync(item, remoteRefs, baseBranch)));
         }
         catch (Exception error)
         {
-            return worktrees.Select(_ => GitWorktreeState.Failed(error.Message)).ToArray();
+            return worktrees.Select(_ => GitWorktreeState.Failed(baseBranch, error.Message)).ToArray();
         }
     }
 
     public async Task FetchOriginAsync() =>
         await RunGitAsync(repositoryPath, false, "fetch", "--prune", "origin");
 
-    private static async Task<GitWorktreeState> GetStateAsync(Worktree worktree, HashSet<string> remoteRefs)
+    private static async Task<GitWorktreeState> GetStateAsync(
+        Worktree worktree, HashSet<string> remoteRefs, string baseBranch)
     {
         try
         {
@@ -80,10 +82,10 @@ internal sealed class GitStatusService(string repositoryPath)
             var compareTask = hasRemoteBranch
                 ? RunGitAsync(worktree.Path, true, "rev-list", "--left-right", "--count",
                     $"HEAD...{remoteRef}") : Task.FromResult("");
-            var hasMain = remoteRefs.Contains("refs/remotes/origin/main");
-            var mainCompareTask = hasMain && worktree.Branch != "main"
+            var hasBase = remoteRefs.Contains($"refs/remotes/origin/{baseBranch}");
+            var mainCompareTask = hasBase && worktree.Branch != baseBranch
                 ? RunGitAsync(worktree.Path, true, "rev-list", "--left-right", "--count",
-                    "HEAD...refs/remotes/origin/main") : Task.FromResult("");
+                    $"HEAD...refs/remotes/origin/{baseBranch}") : Task.FromResult("");
 
             var results = await Task.WhenAll(statusTask, commitTask, compareTask, mainCompareTask);
             var status = results[0];
@@ -124,15 +126,15 @@ internal sealed class GitStatusService(string repositoryPath)
             {
                 (ahead, behind) = ParseCommitCounts(compare);
             }
-            var mainMerge = worktree.Branch == "main" ? MainMergeState.Baseline :
-                !hasMain ? MainMergeState.Unavailable : MainMergeStatusFor(results[3]);
-            return new GitWorktreeState(commitParts[0], commitParts[1], committedAt,
+            var mainMerge = worktree.Branch == baseBranch ? MainMergeState.Baseline :
+                !hasBase ? MainMergeState.Unavailable : MainMergeStatusFor(results[3]);
+            return new GitWorktreeState(baseBranch, commitParts[0], commitParts[1], committedAt,
                 changed, staged, unstaged, untracked, upstream, remoteBranch, ahead, behind,
                 mainMerge, null);
         }
         catch (Exception error)
         {
-            return GitWorktreeState.Failed(error.Message);
+            return GitWorktreeState.Failed(baseBranch, error.Message);
         }
     }
 

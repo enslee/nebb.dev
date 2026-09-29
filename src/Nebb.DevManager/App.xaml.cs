@@ -14,26 +14,29 @@ public partial class App : Application
         ownsMutex = createdNew;
         if (!createdNew)
         {
-            MessageBox.Show("PixPeek 개발 서버 관리 앱이 이미 열려 있습니다.",
-                "PixPeek Dev Manager", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show("Dev Manager가 이미 열려 있습니다.",
+                "Dev Manager", MessageBoxButton.OK, MessageBoxImage.Information);
             Shutdown();
             return;
         }
         base.OnStartup(e);
         try
         {
-            var repositoryPath = PixPeekRepository.Resolve(e.Args);
-            if (repositoryPath is null)
+            var catalog = new RepositoryCatalog();
+            catalog.Load();
+            string? selectedRepository = null;
+            if (e.Args.Length > 0)
             {
-                Shutdown();
-                return;
+                if (e.Args.Length != 2 || e.Args[0] != "--repository")
+                    throw new ArgumentException("사용법: Nebb.DevManager.exe [--repository <Git 저장소 경로>]");
+                selectedRepository = catalog.Add(e.Args[1]).Path;
             }
-            MainWindow = new MainWindow(repositoryPath);
+            MainWindow = new MainWindow(catalog, selectedRepository);
             MainWindow.Show();
         }
         catch (Exception error)
         {
-            MessageBox.Show(error.Message, "PixPeek Dev Manager",
+            MessageBox.Show(error.Message, "Dev Manager",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             Shutdown();
         }
