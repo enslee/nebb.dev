@@ -298,6 +298,9 @@ public partial class MainWindow : Window
         if (WorktreeGrid.SelectedItem is WorktreeRow row) OpenRow(row);
     }
 
+    private void LocalModel_Click(object sender, RoutedEventArgs e) =>
+        new LocalModelDialog { Owner = this }.ShowDialog();
+
     private async Task StartRowAsync(WorktreeRow row)
     {
         if (!await RunActionAsync(row, row.Context.Manager.StartAsync, activityStatus: "전환 중")) return;
@@ -544,6 +547,7 @@ public partial class MainWindow : Window
     private void UpdateSelection()
     {
         AddRepositoryButton.IsEnabled = !busy;
+        LocalModelButton.IsEnabled = !busy;
         RepositoryFilter.IsEnabled = !busy;
         FetchButton.IsEnabled = !busy && contexts.Count > 0;
         if (WorktreeGrid.SelectedItem is not WorktreeRow row)
@@ -582,6 +586,7 @@ public partial class MainWindow : Window
 
     private void ToggleButtons(bool enabled)
     {
+        LocalModelButton.IsEnabled = enabled;
         StartButton.IsEnabled = enabled;
         StopButton.IsEnabled = enabled;
         OpenButton.IsEnabled = enabled;

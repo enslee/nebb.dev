@@ -60,6 +60,8 @@
         <Button x:Name="StartButton" Content="실행/전환" Width="100" Margin="0,0,8,0" Click="Start_Click" />
         <Button x:Name="StopButton" Content="종료" Width="90" Margin="0,0,8,0" Click="Stop_Click" />
         <Button x:Name="OpenButton" Content="웹 열기" Width="100" Click="Open_Click" />
+        <Button x:Name="LocalModelButton" Content="로컬 모델" Width="100" Margin="8,0,0,0"
+                Click="LocalModel_Click" />
       </StackPanel>
     </StackPanel>
 

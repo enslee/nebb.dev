@@ -36,3 +36,21 @@ dotnet run --project src/Nebb.DevManager/Nebb.DevManager.csproj -- --repository 
 PixPeek 서버 실행에는 Node.js/npm과 Chrome이 필요합니다. 기존 PixPeek Dev
 Manager와 같은 단일 실행 잠금 및 `%LOCALAPPDATA%\PixPeek\DevManager`의 실행
 기록을 사용하므로, 새 앱을 사용하려면 기존 앱을 닫으세요.
+
+## nebb 로컬 모델 준비
+
+**로컬 모델**에서 Qwen3 1.7B 또는 4B의 Q4_K_M GGUF 파일을 선택해 설치할 수
+있습니다. PC가 16 GB급 물리 메모리와 논리 프로세서 4개 이상이면 4B를,
+그 외에는 1.7B를 추천합니다. 추천과 무관하게 사용자가 직접 선택할 수 있습니다.
+
+설치 파일은 Qwen의 Hugging Face 저장소에서 내려받아 크기와 SHA-256을 확인합니다.
+설치 위치는 `%LOCALAPPDATA%\Nebb\models`입니다. 다운로드를
+취소하거나 검증에 실패하면 임시 파일을 지웁니다. 이미 설치한 모델은 다시
+다운로드하지 않고 선택할 수 있으며, 두 모델을 모두 보관할 수 있습니다.
+현재 선택한 모델은 같은 폴더의 `selection.json`에 기록됩니다. 이후 nebb의
+모델 사용 기능은 `LocalModelManager.GetSelectedModel()`에서 모델 경로를
+가져올 수 있습니다. 이번 단계에는 모델 실행과 대화 화면이 포함되지 않습니다.
+
+1.7B Q4_K_M은 [Qwen 공식 저장소의 고정된 이전 리비전](https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/tree/7fb011e9aee6e4dc7adf8430df9ea8de6a466aa3),
+4B Q4_K_M은 [Qwen 공식 저장소](https://huggingface.co/Qwen/Qwen3-4B-GGUF)의
+고정된 리비전을 사용합니다.
