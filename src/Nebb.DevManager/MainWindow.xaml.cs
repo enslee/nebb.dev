@@ -301,6 +301,20 @@ public partial class MainWindow : Window
     private void LocalModel_Click(object sender, RoutedEventArgs e) =>
         new LocalModelDialog { Owner = this }.ShowDialog();
 
+    private void CommandSettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (busy || WorktreeGrid.SelectedItem is not WorktreeRow row) return;
+        try
+        {
+            new CommandSettingsDialog(row.Context.Repository.Path, row.Path) { Owner = this }.ShowDialog();
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, error.Message, "명령 설정을 열 수 없습니다",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private async Task StartRowAsync(WorktreeRow row)
     {
         if (!await RunActionAsync(row, row.Context.Manager.StartAsync, activityStatus: "전환 중")) return;
@@ -548,6 +562,7 @@ public partial class MainWindow : Window
     {
         AddRepositoryButton.IsEnabled = !busy;
         LocalModelButton.IsEnabled = !busy;
+        CommandSettingsButton.IsEnabled = !busy && WorktreeGrid.SelectedItem is WorktreeRow;
         RepositoryFilter.IsEnabled = !busy;
         FetchButton.IsEnabled = !busy && contexts.Count > 0;
         if (WorktreeGrid.SelectedItem is not WorktreeRow row)
@@ -587,6 +602,7 @@ public partial class MainWindow : Window
     private void ToggleButtons(bool enabled)
     {
         LocalModelButton.IsEnabled = enabled;
+        CommandSettingsButton.IsEnabled = enabled;
         StartButton.IsEnabled = enabled;
         StopButton.IsEnabled = enabled;
         OpenButton.IsEnabled = enabled;

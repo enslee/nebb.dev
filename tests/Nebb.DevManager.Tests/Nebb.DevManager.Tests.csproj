@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Nebb.DevManager/CommandSettings.cs" Link="CommandSettings.cs" />
+    <Compile Include="../../src/Nebb.DevManager/CommandDiscovery.cs" Link="CommandDiscovery.cs" />
+    <Compile Include="../../src/Nebb.DevManager/CommandDetectionRules.cs" Link="CommandDetectionRules.cs" />
+  </ItemGroup>
+</Project>

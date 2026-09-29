@@ -1,0 +1,193 @@
+using System.IO;
+using System.Windows;
+using System.Windows.Controls;
+
+namespace Nebb.DevManager;
+
+public partial class CommandSettingsDialog : Window
+{
+    private readonly string repositoryPath;
+    private readonly string worktreePath;
+    private readonly CommandSettingsStore store;
+    private readonly RepositoryCommandSettings settings;
+    private readonly CommandDiscovery discovery = new();
+    private readonly HashSet<(bool Override, CommandKind Kind)> changed = [];
+    private readonly Dictionary<(bool Override, CommandKind Kind), string> environmentDraft = [];
+    private IReadOnlyList<CommandCandidate> defaultCandidates = [];
+    private IReadOnlyList<CommandCandidate> overrideCandidates = [];
+    private bool initialized;
+    private bool loadingEditor;
+    private bool editorChanged;
+    private bool activeOverride;
+    private CommandKind activeKind;
+
+    internal CommandSettingsDialog(string repositoryPath, string worktreePath,
+        string? storageDirectory = null)
+    {
+        this.repositoryPath = Path.GetFullPath(repositoryPath);
+        this.worktreePath = Path.GetFullPath(worktreePath);
+        store = new CommandSettingsStore(this.repositoryPath, storageDirectory);
+        settings = store.Load();
+        InitializeComponent();
+        LocationText.Text = $"저장소: {this.repositoryPath}\n워크트리: {this.worktreePath}";
+        ScopeChoice.SelectedIndex = 0;
+        KindChoice.SelectedIndex = 0;
+        foreach (var box in new[] { NameBox, CommandBox, ArgumentsBox, WorkingDirectoryBox, EnvironmentBox })
+            box.TextChanged += (_, _) => { if (!loadingEditor) editorChanged = true; };
+        initialized = true;
+        LoadEditor();
+        Loaded += async (_, _) => await RefreshCandidatesAsync();
+    }
+
+    private CommandPair CurrentPair => activeOverride
+        ? settings.OverrideFor(worktreePath)
+        : settings.Default;
+
+    private SavedCommand? CurrentSaved => CurrentPair.Get(activeKind);
+    private IReadOnlyList<CommandCandidate> CurrentCandidates =>
+        activeOverride ? overrideCandidates : defaultCandidates;
+
+    private void SetCurrent(SavedCommand? value)
+    {
+        CurrentPair.Set(activeKind, value);
+        changed.Add((activeOverride, activeKind));
+        environmentDraft.Remove((activeOverride, activeKind));
+        LoadEditor();
+    }
+
+    private void CaptureEditor()
+    {
+        if (!editorChanged || CurrentSaved is not { } command) return;
+        command.Name = NameBox.Text.Trim();
+        command.Command = CommandBox.Text.Trim();
+        command.Arguments = ArgumentsBox.Text.Trim();
+        command.WorkingDirectory = WorkingDirectoryBox.Text.Trim();
+        environmentDraft[(activeOverride, activeKind)] = EnvironmentBox.Text;
+        changed.Add((activeOverride, activeKind));
+        editorChanged = false;
+    }
+
+    private void LoadEditor()
+    {
+        if (!initialized) return;
+        loadingEditor = true;
+        var own = CurrentSaved;
+        var value = own ?? (activeOverride ? settings.Default.Get(activeKind) : null);
+        var editable = own is not null;
+        NameBox.Text = value?.Name ?? "";
+        CommandBox.Text = value?.Command ?? "";
+        ArgumentsBox.Text = value?.Arguments ?? "";
+        WorkingDirectoryBox.Text = value?.WorkingDirectory ?? "";
+        EnvironmentBox.Text = value is null ? "" :
+            environmentDraft.GetValueOrDefault((activeOverride, activeKind)) ??
+            string.Join(Environment.NewLine, value.Environment.Select(item => $"{item.Name}={item.Value}"));
+        foreach (var box in new[] { NameBox, CommandBox, ArgumentsBox, WorkingDirectoryBox, EnvironmentBox })
+            box.IsEnabled = editable;
+        ClearButton.Content = activeOverride ? "Override 해제" : "선택 해제";
+        ClearButton.IsEnabled = own is not null;
+        CopyDefaultButton.Visibility = activeOverride ? Visibility.Visible : Visibility.Collapsed;
+        CopyDefaultButton.IsEnabled = activeOverride && own is null && settings.Default.Get(activeKind) is not null;
+        var missing = CommandDiscovery.SourceMissing(value, CurrentCandidates);
+        StateText.Text = value is null
+            ? "선택된 명령이 없습니다. 후보를 선택하거나 직접 추가하세요."
+            : activeOverride && own is null
+                ? $"저장소 기본값을 상속합니다.{(missing ? " 원본 후보 없음." : "")}"
+                : missing ? "원본 후보 없음: 저장한 명령은 유지됩니다."
+                : "선택된 명령을 수정할 수 있습니다. 이 화면에서는 명령을 실행하지 않습니다.";
+        editorChanged = false;
+        loadingEditor = false;
+    }
+
+    private void UpdateCandidates()
+    {
+        CandidateList.ItemsSource = CurrentCandidates.Where(item => item.Kind == activeKind).ToArray();
+        ChooseCandidateButton.IsEnabled = CandidateList.Items.Count > 0;
+        LoadEditor();
+    }
+
+    private async Task RefreshCandidatesAsync()
+    {
+        CaptureEditor();
+        RefreshCandidatesButton.IsEnabled = false;
+        StateText.Text = "명령 후보를 탐지하는 중입니다...";
+        try
+        {
+            defaultCandidates = await Task.Run(() => discovery.Discover(repositoryPath));
+            overrideCandidates = worktreePath.Equals(repositoryPath, StringComparison.OrdinalIgnoreCase)
+                ? defaultCandidates : await Task.Run(() => discovery.Discover(worktreePath));
+            UpdateCandidates();
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            MessageBox.Show(this, error.Message, "명령 후보 탐지 실패",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            StateText.Text = "후보를 탐지하지 못했습니다. 직접 추가는 계속 사용할 수 있습니다.";
+        }
+        finally { RefreshCandidatesButton.IsEnabled = true; }
+    }
+
+    private void Choice_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!initialized) return;
+        CaptureEditor();
+        activeOverride = ScopeChoice.SelectedIndex == 1;
+        activeKind = KindChoice.SelectedIndex == 1 ? CommandKind.Test : CommandKind.Run;
+        UpdateCandidates();
+    }
+
+    private async void RefreshCandidates_Click(object sender, RoutedEventArgs e) =>
+        await RefreshCandidatesAsync();
+
+    private void ChooseCandidate_Click(object sender, RoutedEventArgs e)
+    {
+        if (CandidateList.SelectedItem is not CommandCandidate candidate) return;
+        CaptureEditor();
+        SetCurrent(SavedCommand.FromCandidate(candidate));
+    }
+
+    private void Manual_Click(object sender, RoutedEventArgs e)
+    {
+        CaptureEditor();
+        SetCurrent(new SavedCommand { Name = "사용자 명령" });
+        CommandBox.Focus();
+    }
+
+    private void CopyDefault_Click(object sender, RoutedEventArgs e)
+    {
+        if (!activeOverride || settings.Default.Get(activeKind) is not { } value) return;
+        CaptureEditor();
+        SetCurrent(value.Copy());
+    }
+
+    private void Clear_Click(object sender, RoutedEventArgs e)
+    {
+        CaptureEditor();
+        SetCurrent(null);
+    }
+
+    private void Save_Click(object sender, RoutedEventArgs e)
+    {
+        CaptureEditor();
+        try
+        {
+            foreach (var slot in changed)
+            {
+                var command = (slot.Override
+                    ? settings.OverrideFor(worktreePath) : settings.Default).Get(slot.Kind);
+                if (command is null) continue;
+                CommandSettingsValidator.Validate(command, slot.Override ? worktreePath : repositoryPath,
+                    environmentDraft.GetValueOrDefault(slot) ??
+                    string.Join(Environment.NewLine, command.Environment.Select(item => $"{item.Name}={item.Value}")));
+            }
+            store.Save(settings);
+            DialogResult = true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            MessageBox.Show(this, error.Message, "명령 설정 저장 실패",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
+}
