@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Text.Json.Serialization;
 
 namespace Nebb.DevManager;
 
@@ -71,6 +72,7 @@ internal sealed class SavedCommand
 
 internal sealed class CommandPair
 {
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SavedCommand? Run { get; set; }
     public SavedCommand? Test { get; set; }
 
@@ -94,13 +96,39 @@ internal sealed class CommandPair
 
 internal sealed class RepositoryCommandSettings
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
     public string RepositoryPath { get; set; } = "";
     public CommandPair Default { get; set; } = new();
     public Dictionary<string, CommandPair> Worktrees { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public List<SavedCommand> DefaultServices { get; set; } = [];
     public Dictionary<string, List<SavedCommand>> ServiceOverrides { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
+    public List<RunProfile> DefaultProfiles { get; set; } = [];
+    public Dictionary<string, List<RunProfile>> ProfileOverrides { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, string> SelectedProfiles { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public IReadOnlyList<RunProfile> EffectiveProfiles(string worktreePath) =>
+        ProfileOverrides.GetValueOrDefault(Path.GetFullPath(worktreePath)) ?? DefaultProfiles;
+
+    public List<RunProfile> CopyDefaultProfilesFor(string worktreePath)
+    {
+        var copy = DefaultProfiles.Select(profile => profile.Copy()).ToList();
+        ProfileOverrides[Path.GetFullPath(worktreePath)] = copy;
+        return copy;
+    }
+
+    public void ResetProfileOverride(string worktreePath) =>
+        ProfileOverrides.Remove(Path.GetFullPath(worktreePath));
+
+    public RunProfile? SelectedProfile(string worktreePath)
+    {
+        var path = Path.GetFullPath(worktreePath);
+        var profiles = EffectiveProfiles(path);
+        var selected = SelectedProfiles.GetValueOrDefault(path);
+        return profiles.FirstOrDefault(profile => profile.Id == selected) ?? profiles.FirstOrDefault();
+    }
 
     public SavedCommand? Effective(string worktreePath, CommandKind kind) =>
         Worktrees.GetValueOrDefault(Path.GetFullPath(worktreePath))?.Get(kind) ?? Default.Get(kind);
@@ -155,7 +183,7 @@ internal sealed class CommandSettingsStore
         if (!File.Exists(filePath)) return Empty();
         var loaded = JsonSerializer.Deserialize<RepositoryCommandSettings>(File.ReadAllText(filePath), JsonOptions)
             ?? throw new InvalidDataException("명령 설정 파일이 비어 있습니다.");
-        if (loaded.Version != 1 || !Path.GetFullPath(loaded.RepositoryPath).Equals(
+        if (loaded.Version is not (1 or 2) || !Path.GetFullPath(loaded.RepositoryPath).Equals(
                 repositoryPath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("명령 설정 파일의 버전 또는 저장소 경로가 일치하지 않습니다.");
         loaded.Default ??= new CommandPair();
@@ -164,12 +192,30 @@ internal sealed class CommandSettingsStore
         loaded.DefaultServices ??= [];
         loaded.ServiceOverrides = new Dictionary<string, List<SavedCommand>>(
             loaded.ServiceOverrides ?? [], StringComparer.OrdinalIgnoreCase);
+        loaded.DefaultProfiles ??= [];
+        loaded.ProfileOverrides = new Dictionary<string, List<RunProfile>>(
+            loaded.ProfileOverrides ?? [], StringComparer.OrdinalIgnoreCase);
+        loaded.SelectedProfiles = new Dictionary<string, string>(
+            loaded.SelectedProfiles ?? [], StringComparer.OrdinalIgnoreCase);
+        if (loaded.Version == 1) MigrateLegacyRuns(loaded);
+        foreach (var profile in loaded.DefaultProfiles.Concat(loaded.ProfileOverrides.Values.SelectMany(list => list)))
+        {
+            profile.Items ??= [];
+            foreach (var item in profile.Items)
+            {
+                item.Environment ??= [];
+                item.DependsOn ??= [];
+                item.Readiness ??= new RunReadiness();
+            }
+        }
         return loaded;
     }
 
     public void Save(RepositoryCommandSettings settings)
     {
-        settings.Version = 1;
+        if (settings.Version == 1 && File.Exists(filePath) &&
+            !File.Exists(filePath + ".v1.bak")) File.Copy(filePath, filePath + ".v1.bak");
+        settings.Version = 2;
         settings.RepositoryPath = repositoryPath;
         var directory = Path.GetDirectoryName(filePath)!;
         Directory.CreateDirectory(directory);
@@ -179,6 +225,20 @@ internal sealed class CommandSettingsStore
     }
 
     private RepositoryCommandSettings Empty() => new() { RepositoryPath = repositoryPath };
+
+    private static void MigrateLegacyRuns(RepositoryCommandSettings settings)
+    {
+        if (settings.Default.Run is { } defaultRun)
+            settings.DefaultProfiles.Add(RunProfile.FromLegacy(defaultRun, "legacy-default"));
+        settings.Default.Run = null;
+        foreach (var (path, pair) in settings.Worktrees)
+        {
+            if (pair.Run is not { } run) continue;
+            settings.ProfileOverrides[path] =
+                [RunProfile.FromLegacy(run, "legacy-default")];
+            pair.Run = null;
+        }
+    }
 }
 
 internal static class CommandSettingsValidator

@@ -1,5 +1,7 @@
 using Nebb.DevManager;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json.Nodes;
 
 if (args.Length == 2 && args[0] == "--scan")
@@ -319,7 +321,235 @@ try
         }
     }
 
-    Console.WriteLine($"PASS: {candidates.Count} candidates, 11 stacks, persistence, run/switch/stop/exit");
+    var legacyDirectory = Path.Combine(root, "legacy-settings");
+    var legacyStore = new CommandSettingsStore(root, legacyDirectory);
+    var legacyPath = Path.Combine(legacyDirectory, Directory.GetFiles(Path.Combine(root, "settings"), "*.json")
+        .Select(Path.GetFileName).Single()!);
+    Directory.CreateDirectory(legacyDirectory);
+    File.WriteAllText(legacyPath, System.Text.Json.JsonSerializer.Serialize(new
+    {
+        Version = 1, RepositoryPath = root,
+        Default = new CommandPair { Run = new SavedCommand
+            { Name = "Old API", Command = "dotnet", Arguments = "run" } },
+        Worktrees = new Dictionary<string, CommandPair>
+        {
+            [Path.Combine(root, "legacy-worktree")] = new CommandPair
+            {
+                Run = new SavedCommand { Name = "Old branch", Command = "npm",
+                    Arguments = "run dev" }
+            }
+        }
+    }));
+    var migrated = legacyStore.Load();
+    Expect(migrated.DefaultProfiles.Single().Items.Single().Command == "dotnet" &&
+        migrated.Default.Run is null &&
+        migrated.EffectiveProfiles(Path.Combine(root, "legacy-worktree"))
+            .Single().Items.Single().Command == "npm", "Legacy Run migration");
+    legacyStore.Save(migrated);
+    Expect(File.Exists(legacyPath + ".v1.bak") && legacyStore.Load().Version == 2,
+        "Legacy backup or version upgrade");
+
+    var profile = new RunProfile { Name = "Mobile Development" };
+    var step = new RunItem { Name = "Migration", Kind = RunItemKind.ShellScript,
+        Lifecycle = RunLifecycle.OneShot, Script = "Write-Output 'step-out'; [Console]::Error.WriteLine('step-err')" };
+    profile.Items.Add(step);
+    var server = new RunItem { Name = "API", Kind = RunItemKind.ShellScript,
+        Script = "Start-Sleep -Seconds 30", DependsOn = [step.Id] };
+    profile.Items.Add(server);
+    var app = new RunItem { Name = "Flutter", Kind = RunItemKind.ShellScript,
+        Script = "Write-Output 'flutter-started'; Start-Sleep -Seconds 30", DependsOn = [server.Id] };
+    profile.Items.Add(app);
+    var snapshots = new RepositoryCommandSettings { RepositoryPath = root,
+        DefaultProfiles = [profile] };
+    var branchRoot = Path.Combine(root, "profile-branch");
+    Directory.CreateDirectory(branchRoot);
+    var copy = snapshots.CopyDefaultProfilesFor(branchRoot);
+    copy[0].Items[0].Name = "Branch migration";
+    Expect(snapshots.DefaultProfiles[0].Items[0].Name == "Migration" &&
+        snapshots.EffectiveProfiles(branchRoot)[0].Items[0].Name == "Branch migration",
+        "Profile override must be a snapshot");
+    snapshots.ResetProfileOverride(branchRoot);
+    Expect(snapshots.EffectiveProfiles(branchRoot)[0].Items[0].Name == "Migration",
+        "Profile override reset");
+    var cycle = profile.Copy();
+    cycle.Items[0].DependsOn.Add(cycle.Items[2].Id);
+    try { RunProfileValidator.Validate(cycle, root); throw new Exception("Cycle accepted"); }
+    catch (ArgumentException) { }
+    var external = new RunProfile { Name = "External", Items = [new RunItem
+    {
+        Name = "Outside", Command = "cmd.exe", WorkingDirectory = Path.GetTempPath()
+    }] };
+    Expect(RunProfileValidator.Validate(external, root).Count == 1,
+        "External path should warn, not fail");
+
+    if (OperatingSystem.IsWindows())
+    {
+        using var reserve = new TcpListener(IPAddress.Loopback, 0);
+        reserve.Start();
+        var port = ((IPEndPoint)reserve.LocalEndpoint).Port;
+        Expect(ListeningPorts.Owners(port).Contains(Environment.ProcessId),
+            "Listening port PID lookup");
+        reserve.Stop();
+        server.Script = $"$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, {port}); $listener.Start(); Write-Output 'api-ready'; Start-Sleep -Seconds 30";
+        server.Readiness = new RunReadiness { Type = RunReadinessKind.Port, Port = port,
+            TimeoutSeconds = 10 };
+        var runner = new RunProfileManager(root, Path.Combine(root, "profile-state"));
+        try
+        {
+            await runner.RunAllAsync(root, profile);
+            Expect(runner.GetItemState(root, profile, step).Status == RunItemStatus.Completed,
+                "One-shot completion missing");
+            Expect(runner.GetItemState(root, profile, server).Status == RunItemStatus.Running &&
+                runner.GetItemState(root, profile, app).Status == RunItemStatus.Running &&
+                runner.GetProfileStatus(root, profile) == RunProfileStatus.Running,
+                "Port dependency did not start dependent process");
+            try
+            {
+                runner.ValidateSettingsTransition(new RepositoryCommandSettings
+                    { RepositoryPath = root });
+                throw new Exception("Active profile removal accepted");
+            }
+            catch (InvalidOperationException) { }
+            Expect(runner.ReadLog(root, profile, step, false).Contains("step-out") &&
+                runner.ReadLog(root, profile, step, true).Contains("step-err"),
+                "stdout and stderr were not separated");
+            for (var attempt = 0; attempt < 30 &&
+                !runner.ReadLog(root, profile, app, false).Contains("flutter-started"); attempt++)
+                await Task.Delay(100);
+            Expect(runner.ReadLog(root, profile, app, false).Contains("flutter-started"),
+                "Dependent log missing");
+            try { await runner.RunAllAsync(root, profile); throw new Exception("Duplicate run accepted"); }
+            catch (InvalidOperationException) { }
+            var conflict = new RunProfile { Name = "Other profile", Items = [new RunItem
+            {
+                Name = "Other API", Kind = RunItemKind.ShellScript, Script = server.Script,
+                Readiness = server.Readiness.Copy()
+            }] };
+            Expect(runner.FindPortConflicts(root, conflict).Any(value =>
+                value.Contains("Mobile Development / API")), "Known port conflict missing");
+            await runner.RunAllAsync(root, conflict);
+            Expect(runner.GetItemState(root, conflict, conflict.Items[0]).Status == RunItemStatus.Failed,
+                "Run Anyway must not accept another Job's port");
+            var parallel = new RunProfile { Name = "Parallel", Items = [new RunItem
+            {
+                Name = "Worker", Kind = RunItemKind.ShellScript,
+                Script = "Start-Sleep -Seconds 30"
+            }] };
+            await runner.RunAllAsync(root, parallel);
+            Expect(runner.HasActiveItems(root, profile) && runner.HasActiveItems(root, parallel),
+                "Different profiles could not run simultaneously");
+            await runner.StopAllAsync(root, parallel);
+            await runner.StopItemAsync(root, profile, server.Id);
+            Expect(ListeningPorts.Owners(port).Count == 0 &&
+                runner.GetItemState(root, profile, app).Status == RunItemStatus.Running &&
+                runner.GetProfileStatus(root, profile) == RunProfileStatus.PartiallyRunning,
+                "Stopping a dependency stopped its dependent");
+            await runner.StopAllAsync(root, profile);
+            Expect(!runner.HasActiveItems(root, profile), "Stop All left a process running");
+            await runner.RestartAllAsync(root, profile);
+            Expect(runner.GetItemState(root, profile, step).Status == RunItemStatus.Completed,
+                "Restart All did not rerun the completed step");
+        }
+        finally { await runner.StopAllAsync(root, profile); }
+        var failed = new RunProfile { Name = "Failed steps", Items = [new RunItem
+        {
+            Name = "Fail", Kind = RunItemKind.ShellScript, Lifecycle = RunLifecycle.OneShot,
+            Script = "exit 5"
+        }] };
+        failed.Items.Add(new RunItem { Name = "Blocked", Kind = RunItemKind.ShellScript,
+            Script = "Start-Sleep -Seconds 10", DependsOn = [failed.Items[0].Id] });
+        await runner.RunAllAsync(root, failed);
+        Expect(runner.GetItemState(root, failed, failed.Items[0]).Status == RunItemStatus.Failed &&
+            runner.GetItemState(root, failed, failed.Items[1]).Reason?.Contains("선행") == true &&
+            runner.GetProfileStatus(root, failed) == RunProfileStatus.Failed,
+            "Failed step did not block dependent");
+
+        Put("scripts/check.ps1", "Write-Output file-powershell");
+        Put("scripts/check.cmd", "@echo off\r\necho file-cmd\r\n");
+        var scripts = new RunProfile { Name = "Shell types", Items =
+        [
+            new RunItem { Name = "cmd inline", Kind = RunItemKind.ShellScript,
+                Lifecycle = RunLifecycle.OneShot, Shell = RunShell.Cmd,
+                Script = "@echo off\r\necho cmd-out\r\necho cmd-err 1>&2" },
+            new RunItem { Name = "PowerShell file", Kind = RunItemKind.ShellScript,
+                Lifecycle = RunLifecycle.OneShot, ScriptSource = RunScriptSource.File,
+                Script = "scripts/check.ps1", Shell = RunShell.Cmd },
+            new RunItem { Name = "cmd file", Kind = RunItemKind.ShellScript,
+                Lifecycle = RunLifecycle.OneShot, ScriptSource = RunScriptSource.File,
+                Script = "scripts/check.cmd", Shell = RunShell.PowerShell }
+        ] };
+        await runner.RunAllAsync(root, scripts);
+        Expect(scripts.Items.All(item => runner.GetItemState(root, scripts, item).Status ==
+            RunItemStatus.Completed), "Shell execution did not complete");
+        Expect(runner.ReadLog(root, scripts, scripts.Items[0], false).Contains("cmd-out") &&
+            runner.ReadLog(root, scripts, scripts.Items[0], true).Contains("cmd-err") &&
+            runner.ReadLog(root, scripts, scripts.Items[1], false).Contains("file-powershell") &&
+            runner.ReadLog(root, scripts, scripts.Items[2], false).Contains("file-cmd"),
+            "Shell selection or output capture failed");
+        var processFolder = Path.Combine(root, "apps", "mobile");
+        Directory.CreateDirectory(processFolder);
+        var processProfile = new RunProfile { Name = "Process", Items = [new RunItem
+        {
+            Name = "cwd/env", Command = "cmd.exe",
+            Arguments = "/d /c echo %RUN_MARKER%:%CD%",
+            WorkingDirectory = "apps/mobile", Lifecycle = RunLifecycle.OneShot,
+            Environment = [new EnvironmentEntry("RUN_MARKER", "marker")]
+        }] };
+        await runner.RunAllAsync(root, processProfile);
+        Expect(runner.GetItemState(root, processProfile, processProfile.Items[0]).Status ==
+            RunItemStatus.Completed && runner.ReadLog(root, processProfile,
+                processProfile.Items[0], false).Contains($"marker:{processFolder}",
+                StringComparison.OrdinalIgnoreCase), "Process working directory or environment failed");
+
+        if (Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator)
+            .Any(path => File.Exists(Path.Combine(path, "npm.cmd"))) == true)
+        {
+            Put("apps/mobile/package.json",
+                """{"scripts":{"dev":"node -e \"console.log('profile-npm-ready');setInterval(()=>{},1000)\""}}""");
+            var npmProfile = new RunProfile { Name = "npm process tree", Items = [new RunItem
+            {
+                Name = "npm", Command = "npm", Arguments = "run dev",
+                WorkingDirectory = "apps/mobile"
+            }] };
+            await runner.RunAllAsync(root, npmProfile);
+            for (var attempt = 0; attempt < 50 &&
+                !runner.ReadLog(root, npmProfile, npmProfile.Items[0], false)
+                    .Contains("profile-npm-ready"); attempt++) await Task.Delay(100);
+            Expect(runner.HasActiveItems(root, npmProfile) &&
+                runner.ReadLog(root, npmProfile, npmProfile.Items[0], false)
+                    .Contains("profile-npm-ready"), "npm child did not stay under profile run");
+            await runner.StopAllAsync(root, npmProfile);
+            Expect(!runner.HasActiveItems(root, npmProfile), "npm process tree was not stopped");
+        }
+
+        using var externalListener = new TcpListener(IPAddress.Loopback, 0);
+        externalListener.Start();
+        var externalPort = ((IPEndPoint)externalListener.LocalEndpoint).Port;
+        var externalProfile = new RunProfile { Name = "Docker-like", Items = [new RunItem
+        {
+            Name = "External listener", Kind = RunItemKind.ShellScript,
+            Script = "Start-Sleep -Seconds 30",
+            Readiness = new RunReadiness { Type = RunReadinessKind.Port,
+                Port = externalPort, TimeoutSeconds = 2, AllowExternalPort = true }
+        }] };
+        await runner.RunAllAsync(root, externalProfile);
+        Expect(runner.GetItemState(root, externalProfile, externalProfile.Items[0]).Status ==
+            RunItemStatus.Running, "External port option did not become ready");
+        await runner.StopAllAsync(root, externalProfile);
+        externalListener.Stop();
+        var timeoutProfile = new RunProfile { Name = "Timeout", Items = [new RunItem
+        {
+            Name = "Never listens", Kind = RunItemKind.ShellScript,
+            Script = "Start-Sleep -Seconds 30",
+            Readiness = new RunReadiness { Type = RunReadinessKind.Port,
+                Port = externalPort, TimeoutSeconds = 1 }
+        }] };
+        await runner.RunAllAsync(root, timeoutProfile);
+        Expect(runner.GetItemState(root, timeoutProfile, timeoutProfile.Items[0]).Status ==
+            RunItemStatus.Failed, "Port timeout did not fail");
+    }
+
+    Console.WriteLine($"PASS: {candidates.Count} candidates, profile migration/snapshot/dependencies/jobs/logs");
 }
 finally
 {

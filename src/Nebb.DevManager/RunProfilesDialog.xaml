@@ -1,0 +1,153 @@
+<Window x:Class="Nebb.DevManager.RunProfilesDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Run Profile 설정" Width="1120" Height="820" MinWidth="900" MinHeight="650"
+        WindowStartupLocation="CenterOwner">
+  <Grid Margin="16">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <StackPanel Grid.Row="0" Margin="0,0,0,12">
+      <TextBlock Text="Run Profile 설정" FontSize="20" FontWeight="SemiBold"/>
+      <TextBlock x:Name="LocationText" Foreground="#65758B" TextWrapping="Wrap"/>
+      <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+        <TextBlock Text="범위" VerticalAlignment="Center" Margin="0,0,8,0"/>
+        <ComboBox x:Name="ScopeChoice" Width="180" SelectionChanged="ScopeChoice_SelectionChanged">
+          <ComboBoxItem Content="저장소 기본"/>
+          <ComboBoxItem Content="이 워크트리"/>
+        </ComboBox>
+        <Button x:Name="CopyButton" Content="기본 목록 복사" Width="120" Margin="12,0,0,0"
+                Click="Copy_Click"/>
+        <Button x:Name="ResetButton" Content="Override 해제" Width="115" Margin="8,0,0,0"
+                Click="Reset_Click"/>
+        <TextBlock x:Name="ScopeStateText" VerticalAlignment="Center" Margin="12,0,0,0"
+                   Foreground="#65758B"/>
+      </StackPanel>
+    </StackPanel>
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="290"/>
+        <ColumnDefinition Width="12"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <Grid Grid.Column="0">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="145"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Text="프로필" FontWeight="SemiBold"/>
+        <ListBox x:Name="ProfileList" Grid.Row="1" DisplayMemberPath="Display"
+                 SelectionChanged="ProfileList_SelectionChanged"/>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,6,0,12">
+          <Button x:Name="AddProfileButton" Content="+ 프로필" Width="90" Click="AddProfile_Click"/>
+          <Button x:Name="RemoveProfileButton" Content="프로필 삭제" Width="90" Margin="8,0,0,0"
+                  Click="RemoveProfile_Click"/>
+        </StackPanel>
+        <TextBlock Grid.Row="3" Text="실행 항목 (끌어서 표시 순서 변경)" FontWeight="SemiBold"/>
+        <ListBox x:Name="ItemList" Grid.Row="4" DisplayMemberPath="Display" AllowDrop="True"
+                 SelectionChanged="ItemList_SelectionChanged" Drop="ItemList_Drop"
+                 PreviewMouseLeftButtonDown="ItemList_PreviewMouseLeftButtonDown"
+                 MouseMove="ItemList_MouseMove"/>
+        <WrapPanel Grid.Row="5" Margin="0,6,0,6">
+          <Button x:Name="AddProcessButton" Content="+ Process" Width="83" Click="AddProcess_Click"/>
+          <Button x:Name="AddScriptButton" Content="+ Shell script" Width="100" Margin="5,0,0,0"
+                  Click="AddScript_Click"/>
+          <Button x:Name="RemoveItemButton" Content="삭제" Width="55" Margin="5,0,0,0"
+                  Click="RemoveItem_Click"/>
+        </WrapPanel>
+        <DockPanel Grid.Row="6">
+          <ComboBox x:Name="CandidateChoice" Width="205" DisplayMemberPath="Display"/>
+          <Button x:Name="AddCandidateButton" Content="후보 추가" Width="75" Margin="7,0,0,0"
+                  Click="AddCandidate_Click"/>
+        </DockPanel>
+      </Grid>
+      <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto">
+        <StackPanel x:Name="EditorPanel" Margin="0,0,8,0">
+          <TextBlock Text="프로필 이름"/>
+          <TextBox x:Name="ProfileNameBox" Margin="0,3,0,12"/>
+          <Separator Margin="0,0,0,12"/>
+          <TextBlock Text="선택한 실행 항목" FontWeight="SemiBold" Margin="0,0,0,8"/>
+          <CheckBox x:Name="EnabledBox" Content="사용" Margin="0,0,0,8"/>
+          <TextBlock Text="이름"/>
+          <TextBox x:Name="NameBox" Margin="0,3,0,8"/>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+            <StackPanel Width="185">
+              <TextBlock Text="종류"/>
+              <ComboBox x:Name="KindChoice" SelectionChanged="EditorChoice_SelectionChanged">
+                <ComboBoxItem Content="Process"/><ComboBoxItem Content="Shell script"/>
+              </ComboBox>
+            </StackPanel>
+            <StackPanel Width="185" Margin="12,0,0,0">
+              <TextBlock Text="실행 방식"/>
+              <ComboBox x:Name="LifecycleChoice" SelectionChanged="EditorChoice_SelectionChanged">
+                <ComboBoxItem Content="완료형 Step"/><ComboBoxItem Content="장기 실행"/>
+              </ComboBox>
+            </StackPanel>
+          </StackPanel>
+          <StackPanel x:Name="ProcessPanel">
+            <TextBlock Text="명령"/>
+            <TextBox x:Name="CommandBox" Margin="0,3,0,8"/>
+          </StackPanel>
+          <StackPanel x:Name="ScriptPanel">
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <StackPanel Width="185">
+                <TextBlock Text="스크립트 입력"/>
+                <ComboBox x:Name="ScriptSourceChoice" SelectionChanged="EditorChoice_SelectionChanged">
+                  <ComboBoxItem Content="인라인"/><ComboBoxItem Content="파일 경로"/>
+                </ComboBox>
+              </StackPanel>
+              <StackPanel Width="185" Margin="12,0,0,0">
+                <TextBlock Text="셸 (인라인)"/>
+                <ComboBox x:Name="ShellChoice">
+                  <ComboBoxItem Content="PowerShell"/><ComboBoxItem Content="cmd"/>
+                </ComboBox>
+              </StackPanel>
+            </StackPanel>
+            <TextBlock x:Name="ScriptLabel" Text="스크립트"/>
+            <TextBox x:Name="ScriptBox" Margin="0,3,0,8" Height="100" AcceptsReturn="True"
+                     VerticalScrollBarVisibility="Auto"/>
+          </StackPanel>
+          <TextBlock Text="인수"/>
+          <TextBox x:Name="ArgumentsBox" Margin="0,3,0,8"/>
+          <TextBlock Text="작업 폴더 (워크트리 기준)"/>
+          <TextBox x:Name="WorkingDirectoryBox" Margin="0,3,0,8"/>
+          <TextBlock Text="환경변수 (한 줄에 NAME=value)"/>
+          <TextBox x:Name="EnvironmentBox" Height="65" AcceptsReturn="True" Margin="0,3,0,8"
+                   VerticalScrollBarVisibility="Auto"/>
+          <TextBlock Text="선행 항목 (여러 개 선택 가능)"/>
+          <ListBox x:Name="DependsList" Height="80" SelectionMode="Multiple"
+                   DisplayMemberPath="Display" Margin="0,3,0,8"/>
+          <StackPanel x:Name="ReadinessPanel">
+            <TextBlock Text="준비 조건"/>
+            <ComboBox x:Name="ReadinessChoice" Width="185" HorizontalAlignment="Left"
+                      SelectionChanged="EditorChoice_SelectionChanged" Margin="0,3,0,8">
+              <ComboBoxItem Content="프로세스 실행"/><ComboBoxItem Content="포트 listen"/>
+            </ComboBox>
+            <StackPanel x:Name="PortPanel">
+              <TextBlock Text="API 서버에 의존하는 앱에는 포트 준비 조건을 권장합니다."
+                         Foreground="#65758B" TextWrapping="Wrap"/>
+              <StackPanel Orientation="Horizontal" Margin="0,5,0,8">
+                <StackPanel Width="185"><TextBlock Text="포트"/><TextBox x:Name="PortBox"/></StackPanel>
+                <StackPanel Width="185" Margin="12,0,0,0">
+                  <TextBlock Text="대기 시간 (초)"/><TextBox x:Name="TimeoutBox"/>
+                </StackPanel>
+              </StackPanel>
+              <CheckBox x:Name="ExternalPortBox" Content="외부 포트 인정 (Docker 등)"/>
+            </StackPanel>
+          </StackPanel>
+        </StackPanel>
+      </ScrollViewer>
+    </Grid>
+    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+      <Button x:Name="SaveButton" Content="저장" Width="90" Margin="0,0,8,0" Click="Save_Click"/>
+      <Button Content="취소" Width="90" Click="Cancel_Click"/>
+    </StackPanel>
+  </Grid>
+</Window>

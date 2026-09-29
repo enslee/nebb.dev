@@ -76,6 +76,9 @@ internal static class WindowsRunJob
     private static extern bool TerminateJobObject(SafeFileHandle job, uint exitCode);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool IsProcessInJob(IntPtr process, SafeFileHandle job, out bool result);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool QueryInformationJobObject(SafeFileHandle job, int infoClass,
         out Accounting information, int length, IntPtr returnLength);
 
@@ -97,6 +100,11 @@ internal static class WindowsRunJob
             var job = CreateJobObject(IntPtr.Zero, name);
             if (job.IsInvalid)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "실행 프로세스 그룹을 만들 수 없습니다.");
+            if (ActiveProcesses(job) > 0)
+            {
+                job.Dispose();
+                throw new InvalidOperationException("이미 실행 중인 프로세스 그룹이 있습니다.");
+            }
             var limits = new ExtendedLimits
                 { BasicLimitInformation = new BasicLimits { LimitFlags = KillOnClose } };
             if (!SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf<ExtendedLimits>()))
@@ -122,6 +130,23 @@ internal static class WindowsRunJob
             if (HeldJobs.TryGetValue(name, out var held)) return ActiveProcesses(held) > 0;
         using var job = OpenJobObject(QueryAndTerminate, false, name);
         return !job.IsInvalid && ActiveProcesses(job) > 0;
+    }
+
+    public static bool ContainsProcess(string name, int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            lock (HeldJobs)
+                if (HeldJobs.TryGetValue(name, out var held))
+                    return IsProcessInJob(process.Handle, held, out var inside) && inside;
+            using var job = OpenJobObject(QueryAndTerminate, false, name);
+            return !job.IsInvalid && IsProcessInJob(process.Handle, job, out var member) && member;
+        }
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException or Win32Exception)
+        {
+            return false;
+        }
     }
 
     public static bool Terminate(string name)

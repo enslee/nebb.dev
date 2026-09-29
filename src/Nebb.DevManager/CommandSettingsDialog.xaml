@@ -1,7 +1,7 @@
 <Window x:Class="Nebb.DevManager.CommandSettingsDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="실행·테스트 명령 설정" Width="930" Height="730" MinWidth="760" MinHeight="600"
+        Title="테스트·서비스 명령 설정" Width="930" Height="730" MinWidth="760" MinHeight="600"
         WindowStartupLocation="CenterOwner">
   <Grid Margin="18">
     <Grid.RowDefinitions>
@@ -14,7 +14,7 @@
     </Grid.RowDefinitions>
 
     <StackPanel Grid.Row="0" Margin="0,0,0,12">
-      <TextBlock Text="실행·테스트 명령 설정" FontSize="20" FontWeight="SemiBold" />
+      <TextBlock Text="테스트·서비스 명령 설정" FontSize="20" FontWeight="SemiBold" />
       <TextBlock x:Name="LocationText" TextWrapping="Wrap" Foreground="#65758B" />
     </StackPanel>
 
@@ -26,7 +26,6 @@
       </ComboBox>
       <TextBlock Text="종류" VerticalAlignment="Center" Margin="20,0,8,0" />
       <ComboBox x:Name="KindChoice" Width="115" SelectionChanged="Choice_SelectionChanged">
-        <ComboBoxItem Content="실행" />
         <ComboBoxItem Content="테스트" />
         <ComboBoxItem Content="서비스" />
       </ComboBox>

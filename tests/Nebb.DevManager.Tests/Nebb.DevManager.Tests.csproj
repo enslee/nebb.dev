@@ -11,5 +11,8 @@
     <Compile Include="../../src/Nebb.DevManager/CommandDetectionRules.cs" Link="CommandDetectionRules.cs" />
     <Compile Include="../../src/Nebb.DevManager/CommandRunManager.cs" Link="CommandRunManager.cs" />
     <Compile Include="../../src/Nebb.DevManager/WindowsRunJob.cs" Link="WindowsRunJob.cs" />
+    <Compile Include="../../src/Nebb.DevManager/RunProfiles.cs" Link="RunProfiles.cs" />
+    <Compile Include="../../src/Nebb.DevManager/RunProfileManager.cs" Link="RunProfileManager.cs" />
+    <Compile Include="../../src/Nebb.DevManager/ListeningPorts.cs" Link="ListeningPorts.cs" />
   </ItemGroup>
 </Project>

@@ -36,6 +36,7 @@ public partial class CommandSettingsDialog : Window
         LocationText.Text = $"저장소: {this.repositoryPath}\n워크트리: {this.worktreePath}";
         ScopeChoice.SelectedIndex = 0;
         KindChoice.SelectedIndex = 0;
+        activeKind = CommandKind.Test;
         foreach (var box in new[] { NameBox, CommandBox, ArgumentsBox, WorkingDirectoryBox, EnvironmentBox })
             box.TextChanged += (_, _) => { if (!loadingEditor) editorChanged = true; };
         initialized = true;
@@ -154,18 +155,9 @@ public partial class CommandSettingsDialog : Window
                 Header = CandidateGrouping.Title(group.Key),
                 IsExpanded = true
             };
-            var runs = group.Where(item => item.Kind == CommandKind.Run).ToArray();
-            if (runs.Any(item => item.Priority == CandidatePriority.Recommended))
-            {
-                AddSubgroup(projectItem, "Recommended",
-                    runs.Where(item => item.Priority == CandidatePriority.Recommended));
-                AddSubgroup(projectItem, "Other",
-                    runs.Where(item => item.Priority == CandidatePriority.Normal));
-            }
-            else foreach (var candidate in runs) projectItem.Items.Add(CandidateItem(candidate));
             AddSubgroup(projectItem, "Tests", group.Where(item => item.Kind == CommandKind.Test));
             AddSubgroup(projectItem, "Services", group.Where(item => item.Kind == CommandKind.Service));
-            CandidateTree.Items.Add(projectItem);
+            if (projectItem.Items.Count > 0) CandidateTree.Items.Add(projectItem);
         }
         ChooseCandidateButton.IsEnabled = false;
         RefreshSelectedServices();
@@ -245,12 +237,7 @@ public partial class CommandSettingsDialog : Window
         if (!initialized) return;
         CaptureEditor();
         activeOverride = ScopeChoice.SelectedIndex == 1;
-        activeKind = KindChoice.SelectedIndex switch
-        {
-            1 => CommandKind.Test,
-            2 => CommandKind.Service,
-            _ => CommandKind.Run
-        };
+        activeKind = KindChoice.SelectedIndex == 1 ? CommandKind.Service : CommandKind.Test;
         activeService = null;
         UpdateCandidates();
     }
@@ -262,13 +249,9 @@ public partial class CommandSettingsDialog : Window
     {
         if (CandidateTree.SelectedItem is not TreeViewItem { Tag: CommandCandidate candidate }) return;
         CaptureEditor();
+        if (candidate.Kind == CommandKind.Run) return;
         if (candidate.Kind != activeKind)
-            KindChoice.SelectedIndex = candidate.Kind switch
-            {
-                CommandKind.Test => 1,
-                CommandKind.Service => 2,
-                _ => 0
-            };
+            KindChoice.SelectedIndex = candidate.Kind == CommandKind.Service ? 1 : 0;
         if (candidate.Kind == CommandKind.Service)
         {
             var services = EditableServices();
