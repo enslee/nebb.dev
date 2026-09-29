@@ -205,14 +205,20 @@ internal sealed class CommandRunManager
 
     internal static string ResolveExecutable(string command, string workingDirectory, string? searchPath)
     {
-        if (Path.HasExtension(command)) return command;
+        var commandExtension = Path.GetExtension(command);
+        if (commandExtension.Length > 0 &&
+            !commandExtension.Equals(".cmd", StringComparison.OrdinalIgnoreCase) &&
+            !commandExtension.Equals(".bat", StringComparison.OrdinalIgnoreCase)) return command;
         var locations = Path.IsPathRooted(command) || command.Contains(Path.DirectorySeparatorChar) ||
                         command.Contains(Path.AltDirectorySeparatorChar)
             ? new[] { workingDirectory }
             : new[] { workingDirectory }.Concat((searchPath ?? "").Split(Path.PathSeparator,
                 StringSplitOptions.RemoveEmptyEntries).Select(item => item.Trim('"')));
+        var extensions = commandExtension.Length > 0
+            ? new[] { "" }
+            : new[] { ".exe", ".cmd", ".bat", ".com" };
         foreach (var location in locations)
-            foreach (var extension in new[] { ".exe", ".cmd", ".bat", ".com" })
+            foreach (var extension in extensions)
             {
                 var candidate = Path.Combine(location, command + extension);
                 if (File.Exists(candidate)) return Path.GetFullPath(candidate);

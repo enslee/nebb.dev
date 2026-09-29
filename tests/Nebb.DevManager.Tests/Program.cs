@@ -570,13 +570,56 @@ try
         if (Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator)
             .Any(path => File.Exists(Path.Combine(path, "npm.cmd"))) == true)
         {
+            var resolvedNpm = CommandRunManager.ResolveExecutable("npm.cmd", processFolder,
+                Environment.GetEnvironmentVariable("PATH"));
+            Expect(Path.IsPathFullyQualified(resolvedNpm) && File.Exists(resolvedNpm),
+                "An explicit .cmd command was not resolved to its installed path");
+            var npmVersionProfile = new RunProfile { Name = "npm.cmd launch", Items =
+            [
+                new RunItem { Name = "npm version", Command = "npm.cmd", Arguments = "--version",
+                    WorkingDirectory = "apps/mobile", Lifecycle = RunLifecycle.OneShot }
+            ] };
+            await runner.RunAllAsync(root, npmVersionProfile);
+            Expect(runner.GetItemState(root, npmVersionProfile,
+                    npmVersionProfile.Items[0]).Status == RunItemStatus.Completed &&
+                !string.IsNullOrWhiteSpace(runner.ReadLog(root, npmVersionProfile,
+                    npmVersionProfile.Items[0], false)),
+                "A quoted relative npm.cmd failed instead of using the installed executable");
             Put("apps/mobile/child.js",
                 "console.log('profile-child-ready');setInterval(()=>{},1000);");
             Put("apps/mobile/parent.js",
                 "require('child_process').spawn(process.execPath,['child.js']," +
                 "{stdio:'inherit'});setInterval(()=>{},1000);");
+            Put("apps/mobile/listener.js",
+                "require('net').createServer().listen(Number(process.env.PIXPEEK_PORT)," +
+                "'127.0.0.1',()=>console.log('profile-port-ready'));");
             Put("apps/mobile/package.json",
-                """{"scripts":{"dev":"node parent.js"}}""");
+                """{"scripts":{"dev":"node parent.js","start":"node listener.js"}}""");
+            using var portReservation = new TcpListener(IPAddress.Loopback, 0);
+            portReservation.Start();
+            var npmPort = ((IPEndPoint)portReservation.LocalEndpoint).Port;
+            portReservation.Stop();
+            var npmStartProfile = new RunProfile { Name = "npm.cmd start", Items =
+            [
+                new RunItem { Name = "PWA-like server", Command = "npm.cmd",
+                    Arguments = "run start", WorkingDirectory = "apps/mobile",
+                    Readiness = new RunReadiness { Type = RunReadinessKind.Port,
+                        Port = npmPort, TimeoutSeconds = 10 },
+                    Environment = [new EnvironmentEntry("PIXPEEK_PORT", npmPort.ToString())] }
+            ] };
+            await runner.RunAllAsync(root, npmStartProfile);
+            try
+            {
+                var npmStart = runner.GetItemState(root, npmStartProfile,
+                    npmStartProfile.Items[0]);
+                Expect(npmStart.Status == RunItemStatus.Running &&
+                    ListeningPorts.Owners(npmPort).Any(pid =>
+                        WindowsRunJob.ContainsProcess(runner.ListInstances().Single(view =>
+                            view.Record.InstanceId == npmStart.InstanceId).Record.JobName!, pid)),
+                    "npm.cmd run start did not become ready through its own Job");
+            }
+            finally { await runner.KillItemAsync(root, npmStartProfile,
+                npmStartProfile.Items[0].Id); }
             var npmProfile = new RunProfile { Name = "npm process tree", Items = [new RunItem
             {
                 Name = "npm", Command = "npm", Arguments = "run dev",

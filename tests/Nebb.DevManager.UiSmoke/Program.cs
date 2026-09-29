@@ -237,6 +237,8 @@ internal static class Program
                         var current = new RunProfileManager(repository).GetItemState(repository,
                             profile, profile.Items[0]);
                         if (current.Status != RunItemStatus.Stopped) return;
+                        if ((bool)mainType.GetField("busy", BindingFlags.Instance |
+                            BindingFlags.NonPublic)!.GetValue(main)!) return;
                         timer.Stop();
                         mainType.GetField("closeApproved", BindingFlags.Instance |
                             BindingFlags.NonPublic)!.SetValue(main, true);
