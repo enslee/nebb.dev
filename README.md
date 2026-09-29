@@ -36,6 +36,10 @@ dotnet run --project src/Nebb.DevManager/Nebb.DevManager.csproj -- --repository 
 실행·테스트 명령 후보를 확인하고 각각 하나를 선택하거나 직접 추가할 수 있습니다.
 후보를 선택한 뒤 이름, 명령, 인수, 워크트리 기준 상대 작업 폴더, 환경변수를
 수정하세요. 환경변수는 한 줄에 `NAME=value` 형식으로 입력합니다.
+후보는 프로젝트 폴더별로 묶어 표시하며 Docker Compose 서비스는 **Services**에
+별도로 표시합니다. 서비스는 여러 개를 선택하고 각각 수정·저장할 수 있습니다.
+선택한 워크트리 안에서 다른 `.git` 저장소나 워크트리를 만나면 그 내부는 탐색하지
+않으며 `.claude/worktrees`의 복사본도 제외합니다.
 
 **저장소 기본** 설정은 대표 워크트리의 파일에서 후보를 찾으며 모든 워크트리가
 상속합니다. **이 워크트리**에서는 해당 워크트리의 파일에서 후보를 찾고 실행과
@@ -43,6 +47,8 @@ dotnet run --project src/Nebb.DevManager/Nebb.DevManager.csproj -- --repository 
 선택할 수 있으며 **Override 해제**로 다시 기본값을 상속합니다. 저장한 명령의
 원본 후보가 사라져도 수정값은 유지되고 화면에 표시됩니다. 설정은 저장소 파일이
 아닌 `%LOCALAPPDATA%\Nebb\DevManager\command-settings`에 저장됩니다.
+서비스 목록도 저장소 기본값을 상속하며, 워크트리에서 기본 목록을 복사해 서비스를
+추가·제거·수정하거나 서비스 Override를 해제할 수 있습니다.
 이 단계의 명령 설정 화면은 명령을 실행하지 않습니다.
 
 PixPeek 서버 실행에는 Node.js/npm과 Chrome이 필요합니다. 기존 PixPeek Dev

@@ -291,12 +291,9 @@ internal sealed class ComposeServiceRule : IDetectionRule
             var match = Regex.Match(line, "^  (?<name>[A-Za-z0-9_.-]+):\\s*(?:#.*)?$");
             if (!match.Success) continue;
             var name = match.Groups["name"].Value;
-            var kind = CandidateRules.KindFor(name) == CommandKind.Test ? CommandKind.Test : CommandKind.Run;
             yield return CandidateRules.Make(project, Id, name, $"Compose {name}", "docker",
-                kind == CommandKind.Test
-                    ? $"compose -f {Path.GetFileName(project.Manifest)} run --rm {name}"
-                    : $"compose -f {Path.GetFileName(project.Manifest)} up {name}",
-                kind, CandidateConfidence.High);
+                $"compose -f {Path.GetFileName(project.Manifest)} up {name}",
+                CommandKind.Service, CandidateConfidence.High);
         }
     }
 }

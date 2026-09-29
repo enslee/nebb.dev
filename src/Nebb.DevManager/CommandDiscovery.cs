@@ -30,10 +30,14 @@ internal sealed class RepositoryScan
             foreach (var child in Directory.EnumerateDirectories(directory))
             {
                 var info = new DirectoryInfo(child);
+                if (info.Attributes.HasFlag(FileAttributes.ReparsePoint) ||
+                    (Path.GetFileName(directory).Equals(".claude", StringComparison.OrdinalIgnoreCase) &&
+                     info.Name.Equals("worktrees", StringComparison.OrdinalIgnoreCase)) ||
+                    File.Exists(Path.Combine(child, ".git")) ||
+                    Directory.Exists(Path.Combine(child, ".git"))) continue;
                 var dartSourceBin = info.Name.Equals("bin", StringComparison.OrdinalIgnoreCase) &&
                     File.Exists(Path.Combine(directory, "pubspec.yaml"));
-                if ((!IgnoredDirectories.Contains(info.Name) || dartSourceBin) &&
-                    !info.Attributes.HasFlag(FileAttributes.ReparsePoint)) pending.Push(child);
+                if (!IgnoredDirectories.Contains(info.Name) || dartSourceBin) pending.Push(child);
             }
             foreach (var file in Directory.EnumerateFiles(directory))
                 files.Add(Relative(file));
@@ -188,6 +192,8 @@ internal sealed class CommandDiscovery
             .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    public static bool SourceMissing(SavedCommand? command, IEnumerable<CommandCandidate> candidates) =>
-        command?.CandidateId is { } id && !candidates.Any(item => item.Id == id);
+    public static bool SourceMissing(SavedCommand? command, IEnumerable<CommandCandidate> candidates,
+        CommandKind? expectedKind = null) =>
+        command?.CandidateId is { } id && !candidates.Any(item => item.Id == id &&
+            (expectedKind is null || item.Kind == expectedKind));
 }

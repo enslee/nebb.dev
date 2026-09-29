@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 namespace Nebb.DevManager;
 
-internal enum CommandKind { Run, Test }
+internal enum CommandKind { Run, Test, Service }
 internal enum CandidateConfidence { Low, Medium, High }
 
 internal sealed record CommandCandidate(
@@ -15,6 +15,22 @@ internal sealed record CommandCandidate(
     CandidateConfidence Confidence)
 {
     public string Display => $"{Name}  ·  {Command} {Arguments}  ·  {WorkingDirectory}  ·  {SourceFile}  ·  {RuleId}  ·  {Confidence}";
+    public string ProjectGroup => CandidateGrouping.ProjectPath(WorkingDirectory);
+}
+
+internal static class CandidateGrouping
+{
+    public static string ProjectPath(string workingDirectory)
+    {
+        var parts = RepositoryScan.Normalize(workingDirectory).Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0 || parts[0] == ".") return ".";
+        return parts.Length > 1 && new[] { "apps", "src", "crates", "packages", "tools" }
+            .Contains(parts[0], StringComparer.OrdinalIgnoreCase)
+            ? $"{parts[0]}/{parts[1]}" : parts[0];
+    }
+
+    public static string Title(string path) => path == "." ? "저장소 루트" :
+        $"{char.ToUpperInvariant(Path.GetFileName(path)[0])}{Path.GetFileName(path)[1..]}  ({path})";
 }
 
 internal sealed record EnvironmentEntry(string Name, string Value);
@@ -27,6 +43,7 @@ internal sealed class SavedCommand
     public string Arguments { get; set; } = "";
     public string WorkingDirectory { get; set; } = ".";
     public List<EnvironmentEntry> Environment { get; set; } = [];
+    public string Display => $"{Name}  ·  {WorkingDirectory}";
 
     public SavedCommand Copy() => new()
     {
@@ -53,12 +70,21 @@ internal sealed class CommandPair
     public SavedCommand? Run { get; set; }
     public SavedCommand? Test { get; set; }
 
-    public SavedCommand? Get(CommandKind kind) => kind == CommandKind.Run ? Run : Test;
+    public SavedCommand? Get(CommandKind kind) => kind switch
+    {
+        CommandKind.Run => Run,
+        CommandKind.Test => Test,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
 
     public void Set(CommandKind kind, SavedCommand? command)
     {
-        if (kind == CommandKind.Run) Run = command;
-        else Test = command;
+        switch (kind)
+        {
+            case CommandKind.Run: Run = command; break;
+            case CommandKind.Test: Test = command; break;
+            default: throw new ArgumentOutOfRangeException(nameof(kind));
+        }
     }
 }
 
@@ -68,6 +94,9 @@ internal sealed class RepositoryCommandSettings
     public string RepositoryPath { get; set; } = "";
     public CommandPair Default { get; set; } = new();
     public Dictionary<string, CommandPair> Worktrees { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<SavedCommand> DefaultServices { get; set; } = [];
+    public Dictionary<string, List<SavedCommand>> ServiceOverrides { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public SavedCommand? Effective(string worktreePath, CommandKind kind) =>
         Worktrees.GetValueOrDefault(Path.GetFullPath(worktreePath))?.Get(kind) ?? Default.Get(kind);
@@ -78,6 +107,22 @@ internal sealed class RepositoryCommandSettings
         if (!Worktrees.TryGetValue(path, out var value)) Worktrees[path] = value = new CommandPair();
         return value;
     }
+
+    public IReadOnlyList<SavedCommand> EffectiveServices(string worktreePath) =>
+        ServiceOverrides.GetValueOrDefault(Path.GetFullPath(worktreePath)) ?? DefaultServices;
+
+    public List<SavedCommand>? ServiceOverrideFor(string worktreePath) =>
+        ServiceOverrides.GetValueOrDefault(Path.GetFullPath(worktreePath));
+
+    public List<SavedCommand> CopyDefaultServicesFor(string worktreePath)
+    {
+        var copy = DefaultServices.Select(item => item.Copy()).ToList();
+        ServiceOverrides[Path.GetFullPath(worktreePath)] = copy;
+        return copy;
+    }
+
+    public void ResetServiceOverride(string worktreePath) =>
+        ServiceOverrides.Remove(Path.GetFullPath(worktreePath));
 }
 
 internal sealed class CommandSettingsStore
@@ -112,6 +157,9 @@ internal sealed class CommandSettingsStore
         loaded.Default ??= new CommandPair();
         loaded.Worktrees = new Dictionary<string, CommandPair>(
             loaded.Worktrees ?? [], StringComparer.OrdinalIgnoreCase);
+        loaded.DefaultServices ??= [];
+        loaded.ServiceOverrides = new Dictionary<string, List<SavedCommand>>(
+            loaded.ServiceOverrides ?? [], StringComparer.OrdinalIgnoreCase);
         return loaded;
     }
 

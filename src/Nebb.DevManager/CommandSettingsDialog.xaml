@@ -28,6 +28,7 @@
       <ComboBox x:Name="KindChoice" Width="115" SelectionChanged="Choice_SelectionChanged">
         <ComboBoxItem Content="실행" />
         <ComboBoxItem Content="테스트" />
+        <ComboBoxItem Content="서비스" />
       </ComboBox>
       <Button x:Name="RefreshCandidatesButton" Content="후보 재탐지" Width="105"
               Margin="20,0,0,0" Click="RefreshCandidates_Click" />
@@ -41,8 +42,20 @@
           <RowDefinition Height="*" />
           <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
-        <ListBox x:Name="CandidateList" DisplayMemberPath="Display"
-                 ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+        <Grid Grid.Row="0">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <TreeView x:Name="CandidateTree" SelectedItemChanged="CandidateTree_SelectedItemChanged"
+                    ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+          <GroupBox x:Name="SelectedServicesGroup" Grid.Column="1" Header="선택한 서비스"
+                    Width="240" Margin="10,0,0,0" Visibility="Collapsed">
+            <ListBox x:Name="SelectedServicesList" DisplayMemberPath="Display"
+                     SelectionChanged="SelectedServicesList_SelectionChanged"
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+          </GroupBox>
+        </Grid>
         <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
           <Button x:Name="ChooseCandidateButton" Content="선택한 후보 사용" Width="130"
                   Margin="0,0,8,0" Click="ChooseCandidate_Click" />
@@ -85,7 +98,9 @@
         <Button x:Name="CopyDefaultButton" Content="기본값 복사해 변경" Width="145"
                 Margin="0,0,8,0" Click="CopyDefault_Click" />
         <Button x:Name="ClearButton" Content="선택 해제" Width="105"
-                Click="Clear_Click" />
+                Margin="0,0,8,0" Click="Clear_Click" />
+        <Button x:Name="ResetServiceOverrideButton" Content="서비스 Override 해제" Width="145"
+                Visibility="Collapsed" Click="ResetServiceOverride_Click" />
       </StackPanel>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
         <Button x:Name="SaveButton" Content="저장" Width="90" Margin="0,0,8,0"
